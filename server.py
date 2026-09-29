@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import http.client
 import ipaddress
 import json
 import re
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -20,7 +22,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -39,6 +41,8 @@ PROFILE_CACHE: tuple[float, dict] | None = None
 PROFILE_CACHE_TTL_SECONDS = 12 * 60 * 60
 PROFILE_DATA_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
 PROFILE_DATA_LICENSE = "CC BY-SA 4.0"
+SPECIAL_USE_SUFFIXES = ("alt", "example", "invalid", "localhost", "onion", "test", "local", "internal", "lan", "home", "arpa")
+SPECIAL_USE_DOMAINS = ("example.com", "example.net", "example.org")
 
 
 class LookupError(Exception):
@@ -138,6 +142,11 @@ def normalize_domain(value: str) -> str:
         raise LookupError("Enter a valid public domain name, IP address, or ASN such as AS15169.")
     if not labels[-1].isascii() or not any(char.isalpha() for char in labels[-1]):
         raise LookupError("Enter a valid public domain name, IP address, or ASN such as AS15169.")
+    if (
+        labels[-1] in SPECIAL_USE_SUFFIXES
+        or any(domain == reserved or domain.endswith("." + reserved) for reserved in SPECIAL_USE_DOMAINS)
+    ):
+        raise LookupError("This is a special-use or internal name. No public source lookup was sent.")
     return domain
 
 
@@ -191,8 +200,8 @@ def identify(value: str) -> dict:
             raise LookupError("That ASN is out of range.")
         return {"type": "asn", "value": f"AS{number}", "number": number}
     if raw.lower().startswith(("http://", "https://")):
-        parsed = urlsplit(raw)
         try:
+            parsed = urlsplit(raw)
             port = parsed.port
         except ValueError as exc:
             raise LookupError("Enter a valid HTTP or HTTPS URL without credentials or a nonstandard port.") from exc
@@ -301,11 +310,11 @@ def get_registration(entity: dict) -> dict:
     return result
 
 
-DNS_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "CAA")
+DNS_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "CAA", "SOA", "DS", "DNSKEY", "HTTPS")
 
 
-def query_dns(name: str, record_type: str) -> list[dict]:
-    query_string = urlencode({"name": name, "type": record_type})
+def query_dns(name: str, record_type: str) -> dict:
+    query_string = urlencode({"name": name, "type": record_type, "do": "true"})
     data = fetch_json(
         f"https://cloudflare-dns.com/dns-query?{query_string}",
         expected_host="cloudflare-dns.com",
@@ -313,32 +322,57 @@ def query_dns(name: str, record_type: str) -> list[dict]:
     )
     if not isinstance(data, dict):
         raise LookupError("The DNS source returned an unexpected record.")
+    response_code = data.get("Status")
+        if type(response_code) is not int:
+        raise LookupError("The DNS source returned no valid response code.")
+    if response_code != 0:
+        descriptions = {1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
+        label = descriptions.get(response_code, f"DNS error {response_code}")
+        if response_code == 3:
+            raise LookupError("The queried DNS name does not exist (NXDOMAIN).")
+        raise LookupError(f"The DNS provider returned {label}.")
     answers = data.get("Answer", [])
-    return [
-        {"data": answer.get("data", ""), "ttl": answer.get("TTL")}
-        for answer in answers
-        if isinstance(answer, dict) and answer.get("data") is not None
-    ]
+    return {
+        "answers": [
+            {"data": answer.get("data", ""), "ttl": answer.get("TTL")}
+            for answer in answers
+            if isinstance(answer, dict) and answer.get("data") is not None
+        ],
+        "authenticatedData": data.get("AD") if type(data.get("AD")) is bool else None,
+    }
 
 
 def get_dns(domain: str) -> dict:
     records: dict[str, list[dict]] = {}
     errors: list[str] = []
+    authenticated: dict[str, bool | None] = {}
 
     with ThreadPoolExecutor(max_workers=len(DNS_TYPES)) as pool:
         futures = {pool.submit(query_dns, domain, record_type): record_type for record_type in DNS_TYPES}
         for future in as_completed(futures):
             record_type = futures[future]
             try:
-                records[record_type] = future.result()
+                answer = future.result()
+                records[record_type] = answer["answers"]
+                authenticated[record_type] = answer["authenticatedData"]
             except LookupError as exc:
                 records[record_type] = []
+                authenticated[record_type] = None
                 errors.append(f"{record_type}: {exc}")
+    errors.sort()
+    authenticated = {record_type: authenticated.get(record_type) for record_type in DNS_TYPES}
+    successful_types = len(DNS_TYPES) - len(errors)
     return {
+        "status": "error" if not successful_types else "partial" if errors else "ok",
         "source": "https://cloudflare-dns.com/dns-query",
         "queriedAt": now_iso(),
         "records": {record_type: records.get(record_type, []) for record_type in DNS_TYPES},
         "errors": errors,
+        "dnssec": {
+            "authenticatedDataByType": authenticated,
+            "authenticatedQueries": sum(value is True for value in authenticated.values()),
+            "checkedQueries": sum(value is not None for value in authenticated.values()),
+        },
     }
 
 
@@ -352,7 +386,7 @@ def get_email_audit(domain: str, dns: dict) -> dict:
         if str(item.get("data", "")).strip('"').lower().startswith("v=spf1")
     ]
     try:
-        dmarc_records = query_dns(f"_dmarc.{domain}", "TXT")
+        dmarc_records = query_dns(f"_dmarc.{domain}", "TXT")["answers"]
         dmarc_error = None
     except LookupError as exc:
         dmarc_records = []
@@ -383,6 +417,20 @@ def get_phone_validation(entity: dict) -> dict:
         "validShape": True,
         "networkRequested": False,
         "notice": "This is a syntax check only. No subscriber, carrier, location, or account information was queried.",
+    }
+
+
+def get_reverse_dns(address: str) -> dict:
+    parsed = ipaddress.ip_address(address)
+    reverse_name = parsed.reverse_pointer
+    answers = query_dns(reverse_name, "PTR")["answers"]
+    return {
+        "source": "https://cloudflare-dns.com/dns-query",
+        "queriedAt": now_iso(),
+        "address": parsed.compressed,
+        "reverseName": reverse_name,
+        "names": sorted({str(item.get("data", "")).rstrip(".").lower() for item in answers if item.get("data")}),
+        "notice": "Reverse DNS is controlled by the address-range operator. Names may be missing or stale and do not verify who uses an address.",
     }
 
 
@@ -431,7 +479,7 @@ def list_open_source_tools() -> dict:
         {
             "id": "domain-footprint",
             "name": "Domain footprint",
-            "purpose": "Combine registry, certificate, DNS, and passive host-search records.",
+            "purpose": "Combine registry, certificate, common DNS, DNSSEC, and passive host-search records.",
             "available": True,
             "mode": "Built-in collectors",
             "url": "https://api.hackertarget.com/hostsearch/",
@@ -494,42 +542,96 @@ def fetch_text(url: str, *, expected_host: str, maximum: int = 2_000_000, timeou
     opener = build_opener(SameHostRedirectHandler())
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.status, response.read(maximum + 1).decode("utf-8", errors="replace")
+            body = response.read(maximum + 1)
+            if len(body) > maximum:
+                raise LookupError("The source response exceeded the local size limit; partial data was discarded.")
+            return response.status, body.decode("utf-8", errors="replace")
     except HTTPError as exc:
-        body = exc.read(maximum + 1).decode("utf-8", errors="replace")
+        body = exc.read(maximum + 1)
+        if len(body) > maximum:
+            raise LookupError("The source response exceeded the local size limit; partial data was discarded.") from exc
+        body = body.decode("utf-8", errors="replace")
         return exc.code, body
     except (URLError, TimeoutError, OSError) as exc:
         raise LookupError("Could not reach the public data source.") from exc
 
 
-def _is_public_hostname(host: str) -> bool:
+def _public_addresses(host: str, port: int = 443) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
     try:
-        addresses = {ipaddress.ip_address(result[4][0]) for result in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
-        return bool(addresses) and all(address.is_global for address in addresses)
+        addresses = {
+            ipaddress.ip_address(result[4][0].split("%", 1)[0])
+            for result in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        }
     except (OSError, ValueError):
-        return False
+        raise LookupError("The profile host did not resolve to public addresses.") from None
+    if not addresses or any(not address.is_global for address in addresses):
+        raise LookupError("The profile host did not resolve exclusively to public addresses.")
+    return sorted(addresses, key=lambda address: (address.version, int(address)))
 
 
 def fetch_profile_url(url: str) -> tuple[int, str]:
-    parsed = urlsplit(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
-        raise LookupError("The profile definition has an invalid URL.")
-    host = parsed.hostname.lower()
-    try:
-        normalize_domain(host)
-    except LookupError as exc:
-        raise LookupError("The profile definition has an invalid host.") from exc
-    if not _is_public_hostname(host):
+    original_host = None
+    current_url = url
+    for redirect_count in range(5):
+        try:
+            parsed = urlsplit(current_url)
+            port = parsed.port
+        except ValueError as exc:
+            raise LookupError("The profile definition has an invalid URL.") from exc
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or port not in (None, 443):
+            raise LookupError("The profile definition has an invalid URL.")
+        host = parsed.hostname.lower()
+        try:
+            host = normalize_domain(host)
+        except LookupError as exc:
+            raise LookupError("The profile definition has an invalid host.") from exc
+        if original_host is None:
+            original_host = host
+        elif host != original_host:
+            raise LookupError("Cross-host profile redirects are blocked.")
+
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        redirect_url = None
+        failures = []
+        for address in _public_addresses(host):
+            connection = http.client.HTTPSConnection(host, 443, timeout=8, context=ssl.create_default_context())
+            try:
+                raw_socket = socket.create_connection((address.compressed, 443), timeout=8)
+                connection.sock = connection._context.wrap_socket(raw_socket, server_hostname=host)
+                connection.request("GET", path, headers={
+                    "Host": host,
+                    "User-Agent": USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Connection": "close",
+                })
+                response = connection.getresponse()
+                body = response.read(250_001)
+                if len(body) > 250_000:
+                    raise LookupError("The profile response exceeded the local size limit; partial data was discarded.")
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.getheader("Location")
+                    if not location:
+                        return response.status, body.decode("utf-8", errors="replace")
+                    redirect_url = urljoin(current_url, location)
+                    break
+                return response.status, body.decode("utf-8", errors="replace")
+            except LookupError:
+                raise
+            except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
+                failures.append(exc)
+            finally:
+                connection.close()
+        if redirect_url:
+            if redirect_count == 4:
+                raise LookupError("The profile site redirected too many times.")
+            current_url = redirect_url
+            continue
+        if failures:
+            raise LookupError("The site did not respond.") from failures[-1]
         raise LookupError("The profile host did not resolve to a public address.")
-    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}, method="GET")
-    opener = build_opener(SameHostRedirectHandler())
-    try:
-        with opener.open(request, timeout=8) as response:
-            return response.status, response.read(250_000).decode("utf-8", errors="replace")
-    except HTTPError as exc:
-        return exc.code, exc.read(250_000).decode("utf-8", errors="replace")
-    except (URLError, TimeoutError, OSError) as exc:
-        raise LookupError("The site did not respond.") from exc
+    raise LookupError("The profile site redirected too many times.")
 
 
 def profile_definitions() -> dict:
@@ -538,11 +640,17 @@ def profile_definitions() -> dict:
         cached = PROFILE_CACHE
         if cached and time.monotonic() - cached[0] < PROFILE_CACHE_TTL_SECONDS:
             return cached[1]
+    try:
         data = fetch_json(PROFILE_DATA_URL, expected_host="raw.githubusercontent.com")
         if not isinstance(data, dict) or not isinstance(data.get("sites"), list):
             raise LookupError("The public profile catalog returned an unexpected document.")
+    except LookupError:
+        if cached:
+            return {**cached[1], "_catalogStale": True}
+        raise
+    with PROFILE_LOCK:
         PROFILE_CACHE = (time.monotonic(), data)
-        return data
+    return data
 
 
 def get_account_categories() -> list[str]:
@@ -564,7 +672,7 @@ def _check_profile(site: dict, handle: str) -> dict:
         missing_code = int(site.get("m_code", 404))
         expected_text = str(site.get("e_string", ""))
         missing_text = str(site.get("m_string", ""))
-        if status_code == expected_code and (not expected_text or expected_text in body) and (not missing_text or missing_text not in body):
+        if status_code == expected_code and expected_text and expected_text in body and (not missing_text or missing_text not in body):
             result = "found"
         elif status_code == missing_code and (not missing_text or missing_text in body):
             result = "not_found"
@@ -619,7 +727,8 @@ def get_account_footprint(entity: dict, authorized: bool, category: str = "all",
         "notFound": sum(item["status"] == "not_found" for item in results),
         "unknown": sum(item["status"] == "unknown" for item in results),
         "sites": results,
-        "notice": "A match only means the public profile URL responded as expected. It does not prove who controls the account.",
+        "catalogStale": data.get("_catalogStale") is True,
+        "notice": ("The profile catalog could not refresh; cached rules were used. " if data.get("_catalogStale") else "") + "A match only means the public profile URL responded as expected. It does not prove who controls the account.",
     }
 
 
@@ -655,21 +764,29 @@ def get_hackertarget_hosts(domain: str) -> dict:
     }
 
 
-def lookup_host_addresses(host: str) -> list[str]:
+def lookup_host_addresses(host: str) -> dict:
     answers = []
+    errors = []
+    successful_types = 0
     for record_type in ("A", "AAAA"):
-        query = urlencode({"name": host, "type": record_type})
-        data = fetch_json(f"https://cloudflare-dns.com/dns-query?{query}", expected_host="cloudflare-dns.com", accept="application/dns-json")
-        if isinstance(data, dict):
-            for answer in data.get("Answer", []):
-                if isinstance(answer, dict) and answer.get("data"):
+        try:
+            response = query_dns(host, record_type)
+            successful_types += 1
+            for answer in response["answers"]:
+                if answer.get("data"):
                     try:
                         address = ipaddress.ip_address(answer["data"])
                         if address.is_global:
                             answers.append(address.compressed)
                     except ValueError:
                         continue
-    return sorted(set(answers))
+        except LookupError as exc:
+            errors.append(f"{record_type}: {exc}")
+    return {
+        "addresses": sorted(set(answers)),
+        "resolutionStatus": "error" if not successful_types else "partial" if errors else "ok",
+        "resolutionErrors": errors,
+    }
 
 
 def get_subdomain_map(domain: str, certificates: dict) -> dict:
@@ -693,9 +810,16 @@ def get_subdomain_map(domain: str, certificates: dict) -> dict:
             try:
                 resolved[host] = future.result()
             except Exception:
-                resolved[host] = []
+                resolved[host] = {"addresses": [], "resolutionStatus": "error", "resolutionErrors": []}
     hosts = [
-        {"name": host, "sources": sorted(findings[host]), "addresses": resolved.get(host, []), "resolutionAttempted": host in resolved}
+        {
+            "name": host,
+            "sources": sorted(findings[host]),
+            "addresses": resolved.get(host, {}).get("addresses", []),
+            "resolutionAttempted": host in resolved,
+            "resolutionStatus": resolved.get(host, {}).get("resolutionStatus"),
+            "resolutionErrors": resolved.get(host, {}).get("resolutionErrors", []),
+        }
         for host in hostnames
     ]
     providers = []
@@ -887,7 +1011,7 @@ def inspect_metadata(payload: dict) -> dict:
         "source": "uwu-osint local metadata parser",
         "fields": fields,
         "stored": False,
-        "notice": "The file was parsed locally and is not saved by the app. Metadata can include location, author, device, or timestamp details.",
+        "notice": "The file was parsed locally and is not saved by the app. This parser recognizes selected fields only; an empty result does not mean the file contains no other metadata. Metadata can include location, author, device, or timestamp details.",
     }
 
 
@@ -908,6 +1032,14 @@ def investigate(value: str, authorized: bool = False, category: str = "all", lim
         modules["emailAudit"] = run_module(get_email_audit, entity["domain"], modules["dns"])
     elif entity["type"] == "phone":
         modules["phoneValidation"] = {"status": "ok", **get_phone_validation(entity)}
+    elif entity["type"] == "ip":
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = {
+                "registration": pool.submit(run_module, get_registration, entity),
+                "reverseDns": pool.submit(run_module, get_reverse_dns, entity["value"]),
+            }
+            for name, future in jobs.items():
+                modules[name] = future.result()
     elif entity["type"] == "domain":
         with ThreadPoolExecutor(max_workers=3) as pool:
             jobs = {

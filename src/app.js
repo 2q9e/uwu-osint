@@ -59,8 +59,8 @@ function countDns(dns) {
 }
 
 function statusBadge(module, label) {
-  const status = module?.status === "ok" ? "available" : "unavailable";
-  const text = module?.status === "ok" ? label : "Unavailable";
+  const status = module?.status === "ok" ? "available" : module?.status === "partial" ? "partial" : "unavailable";
+  const text = module?.status === "ok" ? label : module?.status === "partial" ? "Partial" : "Unavailable";
   return `<span class="status-badge ${status}"><i></i>${esc(text)}</span>`;
 }
 
@@ -79,6 +79,7 @@ function sourcesFor(result) {
   const sources = [];
   if (modules.dns) sources.push({ title: "DNS over HTTPS", name: "Cloudflare", module: modules.dns, icon: "⌁" });
   if (modules.emailAudit) sources.push({ title: "Mail-domain policy records", name: "Cloudflare", module: modules.emailAudit, icon: "✉" });
+  if (modules.reverseDns) sources.push({ title: "Reverse DNS (PTR)", name: "Cloudflare", module: modules.reverseDns, icon: "↩" });
   if (modules.certificates) sources.push({ title: "Certificate transparency", name: "crt.sh", module: modules.certificates, icon: "▤" });
   if (modules.registration) sources.push({ title: "Registration data", name: "IANA RDAP", module: modules.registration, icon: "◈" });
   if (modules.subdomains) {
@@ -126,6 +127,7 @@ function overviewContent(record) {
   if (result.entity?.type === "username") return accountOverview(record);
   if (result.entity?.type === "email") return emailOverview(record);
   if (result.entity?.type === "phone") return phoneOverview(record);
+  if (result.entity?.type === "ip" || result.entity?.type === "asn") return networkOverview(record);
   const domain = result.entity?.type === "domain";
   const certCount = modules.certificates?.names?.length ?? 0;
   const hostCount = modules.subdomains?.totalFound ?? 0;
@@ -143,7 +145,7 @@ function overviewContent(record) {
     <section class="overview-grid">
       <article class="panel overview-panel">
         <div class="panel-heading"><div><span class="eyebrow">01 / NETWORK RECORDS</span><h3>DNS snapshot</h3></div><button class="text-button" data-tab="dns">View details <span>→</span></button></div>
-        ${modules.dns?.status === "ok" ? `<div class="pill-row">${dnsSummary(modules.dns)}</div>` : `<div class="inline-error">${esc(modules.dns?.error || "DNS collection was not run for this subject.")}</div>`}
+        ${modules.dns?.status === "ok" || modules.dns?.status === "partial" ? `<div class="pill-row">${dnsSummary(modules.dns)}</div>` : `<div class="inline-error">${esc(modules.dns?.error || modules.dns?.errors?.join(" · ") || "DNS collection was not run for this subject.")}</div>`}
         ${modules.dns?.errors?.length ? `<div class="subtle-note">${esc(modules.dns.errors.length)} record type(s) could not be retrieved.</div>` : ""}
       </article>
       <article class="panel overview-panel">
@@ -208,6 +210,29 @@ function phoneOverview(record) {
     </section>${notesPanel(record)}`;
 }
 
+function networkOverview(record) {
+  const entity = record.result.entity || {};
+  const registration = record.result.modules?.registration;
+  const reverse = record.result.modules?.reverseDns;
+  const isIp = entity.type === "ip";
+  const addressRange = [registration?.startAddress, registration?.endAddress].filter(Boolean).join(" – ") || "No range returned";
+  const asnRange = registration?.startAutnum != null ? `AS${registration.startAutnum} – AS${registration.endAutnum}` : entity.value;
+  const registrationLabel = registration?.status === "ok" ? "Found" : registration?.status === "error" ? "Unavailable" : "Pending";
+  return `<div class="notice">RDAP describes the registry allocation for this public network value. It does not identify a device or prove who uses the address.</div>
+    <div class="metrics-grid">
+      <article class="metric-card"><span class="metric-label">${isIp ? "Reverse DNS names" : "Autonomous system"}</span><strong class="metric-word">${esc(isIp ? reverse?.names?.length ?? 0 : entity.value || "—")}</strong><span class="metric-foot">${isIp ? "Public PTR records" : "Network identifier"}</span></article>
+      <article class="metric-card"><span class="metric-label">${isIp ? "Address range" : "ASN range"}</span><strong class="metric-word">${esc(isIp ? addressRange : asnRange)}</strong><span class="metric-foot">From the registry response</span></article>
+      <article class="metric-card"><span class="metric-label">Registry country</span><strong class="metric-word">${esc(registration?.country || "—")}</strong><span class="metric-foot">Allocation record, not geolocation</span></article>
+      <article class="metric-card"><span class="metric-label">Registration</span><strong class="metric-word">${esc(registrationLabel)}</strong><span class="metric-foot">${esc(registration?.name || registration?.networkType || registration?.handle || "No registration name returned")}</span></article>
+    </div>
+    <section class="overview-grid">
+      ${isIp ? `<article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">01 / REVERSE DNS</span><h3>PTR names</h3></div><button class="text-button" data-tab="ptr">View details <span>→</span></button></div>${reverse?.status === "ok" ? (reverse.names?.length ? `<div class="pill-row">${reverse.names.slice(0, 8).map((name) => `<span class="mini-pill">${esc(name)}</span>`).join("")}</div>` : `<div class="subtle-note">No PTR answer returned.</div>`) : `<div class="inline-error">${esc(reverse?.error || "Reverse DNS lookup was not available.")}</div>`}<div class="subtle-note">PTR records are set by the address-range operator and may be stale.</div></article>` : `<article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">01 / ASN REGISTRATION</span><h3>Allocation details</h3></div><button class="text-button" data-tab="registration">View record <span>→</span></button></div>${registration?.status === "ok" ? registrationPreview(registration, "asn") : `<div class="inline-error">${esc(registration?.error || "Registration lookup is not available.")}</div>`}</article>`}
+      ${isIp ? `<article class="panel overview-panel registration-panel"><div class="panel-heading"><div><span class="eyebrow">02 / REGISTRY RECORD</span><h3>Registration</h3></div>${registration?.source ? safeLink(registration.source, "RDAP record") : ""}</div>${registration?.status === "ok" ? registrationPreview(registration, entity.type) : `<div class="inline-error">${esc(registration?.error || "Registration lookup is not available.")}</div>`}</article>` : ""}
+    </section>
+    <section class="panel sources-panel"><div class="panel-heading"><div><span class="eyebrow">COLLECTION PROVENANCE</span><h3>Sources & timestamps</h3></div><span class="panel-caption">Public registry and DNS data</span></div>${sourceCards(record.result)}</section>
+    ${notesPanel(record)}`;
+}
+
 function accountOverview(record) {
   const account = record.result.modules?.accounts;
   const sites = account?.sites || [];
@@ -241,21 +266,36 @@ function notesPanel(record) {
   return `<section class="panel notes-panel"><div class="panel-heading"><div><span class="eyebrow">CASE NOTEBOOK</span><h3>Working notes</h3></div><span class="saved-label">Saved in this browser</span></div><textarea data-notes placeholder="Add context, hypotheses, or follow-up questions. These notes stay in local browser storage." rows="3">${esc(record.notes || "")}</textarea></section>`;
 }
 
+function privacyDisclosure(record) {
+  const entity = record?.result?.entity || {};
+  let detail = "When you submit a lookup, the selected public providers receive only the values listed here. Cases stay in this browser until you delete them or use Clear.";
+  if (entity.type === "domain") detail = "This domain is sent to Cloudflare DNS, IANA RDAP/bootstrap, crt.sh certificate search, and HackerTarget passive host search. Discovered hostnames are resolved with Cloudflare DNS.";
+  if (entity.type === "ip" || entity.type === "asn") detail = "This public network value is sent to an IANA-selected RDAP registry. IP cases also send the address’s reverse-DNS name to Cloudflare DNS.";
+  if (entity.type === "username") detail = "The handle is sent to up to 25 public profile sites selected from the live account-check catalog. Each site can log the request; a response does not establish identity.";
+  if (entity.type === "email") detail = `The full address stays in this browser case. Only its domain (${entity.domain || "domain"}) is sent to Cloudflare DNS and an IANA-selected RDAP registry.`;
+  if (entity.type === "phone") detail = "Phone syntax is checked on this machine. No phone number is sent to a lookup provider; the case still stores it in this browser until deleted.";
+  return `<details class="privacy-disclosure"><summary>What gets queried and stored?</summary><p>${esc(detail)} External shortcuts send their query only after you choose a provider and confirm authorization.</p></details>`;
+}
+
 function dnsContent(record) {
   const module = record.result.modules?.dns;
   if (!module) return `<div class="empty-panel"><span class="empty-glyph">⌁</span><h3>No DNS collection</h3><p>DNS lookups are available when the subject is a domain.</p></div>`;
-  if (module.status !== "ok") return `<div class="empty-panel"><span class="empty-glyph">⌁</span><h3>DNS data unavailable</h3><p>${esc(module.error)}</p>${safeLink(module.source || "https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/", "Source documentation")}</div>`;
+  if (module.status === "error") return `<div class="empty-panel"><span class="empty-glyph">⌁</span><h3>DNS data unavailable</h3><p>${esc(module.error || module.errors?.join(" · ") || "The DNS source did not return records.")}</p>${safeLink(module.source || "https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/", "Source documentation")}</div>`;
   const groups = Object.entries(module.records ?? {});
+  const failedTypes = new Set((module.errors || []).map((error) => String(error).split(":", 1)[0]));
+  const dnssec = module.dnssec || {};
   return `<div class="tab-intro"><div><span class="eyebrow">LIVE PUBLIC DNS ANSWERS</span><h2>DNS records</h2><p>Query time ${esc(shortDate(module.queriedAt))}</p></div>${safeLink(module.source, "Provider details")}</div>
+    ${module.status === "partial" ? `<div class="notice warning-notice">Some record types could not be retrieved. Failed queries are shown separately from successful empty answers.</div>` : ""}
     ${module.errors?.length ? `<div class="notice warning-notice">${esc(module.errors.join(" · "))}</div>` : ""}
+    <div class="notice">DNSSEC AD flag: ${esc(dnssec.authenticatedQueries ?? 0)} of ${esc(dnssec.checkedQueries ?? 0)} DNS replies reported the authenticated-data flag. This is a response flag, not a separate security verdict.</div>
     <div class="record-grid">${groups.map(([type, rows]) => `<section class="panel record-panel"><div class="record-heading"><div><span class="record-type">${esc(type)}</span><h3>${esc(recordTypeName(type))}</h3></div><span class="count-tag">${rows.length}</span></div>
-      ${rows.length ? `<ul class="record-list">${rows.map((item) => `<li><code>${esc(item.data)}</code>${item.ttl != null ? `<span>TTL ${esc(item.ttl)}s</span>` : ""}</li>`).join("")}</ul>` : `<div class="empty-record">No answer returned</div>`}
+      ${rows.length ? `<ul class="record-list">${rows.map((item) => `<li><code>${esc(item.data)}</code>${item.ttl != null ? `<span>TTL ${esc(item.ttl)}s</span>` : ""}</li>`).join("")}</ul>` : `<div class="empty-record">${failedTypes.has(type) ? "Query failed; result is unknown" : "No answer returned"}</div>`}
     </section>`).join("")}</div>
     ${sourceCards({ modules: { dns: module } })}`;
 }
 
 function recordTypeName(type) {
-  return ({ A: "IPv4 addresses", AAAA: "IPv6 addresses", CNAME: "Aliases", MX: "Mail exchangers", NS: "Name servers", TXT: "Text records", CAA: "Certificate authorities" })[type] || type;
+  return ({ A: "IPv4 addresses", AAAA: "IPv6 addresses", CNAME: "Aliases", MX: "Mail exchangers", NS: "Name servers", TXT: "Text records", CAA: "Certificate authorities", SOA: "Zone authority", DS: "DNSSEC delegation signer", DNSKEY: "DNSSEC public keys", HTTPS: "HTTPS service hints" })[type] || type;
 }
 
 function certificatesContent(record) {
@@ -311,7 +351,7 @@ function subdomainsContent(record) {
   return `<div class="tab-intro"><div><span class="eyebrow">PASSIVE DOMAIN FOOTPRINT</span><h2>Subdomain map</h2><p>${esc(module.totalFound ?? hosts.length)} scoped hosts · checked ${esc(shortDate(module.queriedAt))}</p></div></div>
     ${module.truncated ? `<div class="notice">At least one public source was capped, or more than 500 names were found. This case may contain a partial result set.</div>` : ""}
     <section class="panel graph-panel"><div class="panel-heading"><div><span class="eyebrow">CORRELATED HOSTS</span><h3>${esc(record.result.entity?.value)}</h3></div><span class="panel-caption">First 18 hosts shown in graph</span></div>${networkGraph(module, record.result.entity?.value)}</section>
-    <div class="panel table-panel host-table"><table><thead><tr><th>Hostname</th><th>Public addresses</th><th>Sources</th></tr></thead><tbody>${hosts.map((host) => `<tr><td><code>${esc(host.name)}</code></td><td>${host.addresses?.length ? host.addresses.map((address) => `<code>${esc(address)}</code>`).join("<br />") : `<span class="muted">${host.resolutionAttempted ? "Unresolved" : "Not checked (limit 25)"}</span>`}</td><td>${(host.sources || []).map((source) => `<span class="tag">${esc(source)}</span>`).join(" ")}</td></tr>`).join("") || `<tr><td colspan="3">No hostnames returned.</td></tr>`}</tbody></table></div>
+    <div class="panel table-panel host-table"><table><thead><tr><th>Hostname</th><th>Public addresses</th><th>Sources</th></tr></thead><tbody>${hosts.map((host) => `<tr><td><code>${esc(host.name)}</code></td><td>${host.addresses?.length ? host.addresses.map((address) => `<code>${esc(address)}</code>`).join("<br />") : `<span class="muted" title="${esc((host.resolutionErrors || []).join(" · "))}">${host.resolutionAttempted ? host.resolutionStatus === "error" ? "Lookup failed" : host.resolutionStatus === "partial" ? "Partial DNS error" : "No public address returned" : "Not checked (limit 25)"}</span>`}</td><td>${(host.sources || []).map((source) => `<span class="tag">${esc(source)}</span>`).join(" ")}</td></tr>`).join("") || `<tr><td colspan="3">No hostnames returned.</td></tr>`}</tbody></table></div>
     ${(module.providers || []).map((provider) => provider.status === "error" ? `<div class="notice warning-notice">${esc(provider.name)}: ${esc(provider.error || "Source unavailable.")}</div>` : "").join("")}
     ${sourceCards({ modules: { subdomains: module } })}`;
 }
@@ -354,9 +394,20 @@ function emailAuditContent(record) {
 function phoneContent(record) {
   const result = record.result.modules?.phoneValidation;
   if (!result) return `<div class="empty-panel"><h3>Phone format details unavailable</h3><p>Refresh the case to run a local format check.</p></div>`;
-  return `<div class="tab-intro"><div><span class="eyebrow">LOCAL VALIDATION</span><h2>Phone number format</h2><p>No external provider was contacted.</p></div><span class="status-badge available"><i></i>Syntax valid</span></div>
+  const valid = result.validShape === true;
+  return `<div class="tab-intro"><div><span class="eyebrow">LOCAL VALIDATION</span><h2>Phone number format</h2><p>No external provider was contacted.</p></div><span class="status-badge ${valid ? "available" : "unavailable"}"><i></i>${valid ? "Syntax valid" : "Invalid format"}</span></div>
     <section class="panel registration-details"><div class="detail-list"><div class="detail-row"><span>Normalized value</span><b>${esc(result.normalized)}</b></div><div class="detail-row"><span>Format</span><b>${esc(result.format)}</b></div><div class="detail-row"><span>Digit count</span><b>${esc(result.digitCount)}</b></div><div class="detail-row"><span>Network requested</span><b>No</b></div></div></section>
     <div class="notice warning-notice">${esc(result.notice)}</div>`;
+}
+
+function ptrContent(record) {
+  const module = record.result.modules?.reverseDns;
+  if (!module) return `<div class="empty-panel"><span class="empty-glyph">↩</span><h3>No reverse DNS collection</h3><p>PTR lookup is available for public IP address cases.</p></div>`;
+  if (module.status !== "ok") return `<div class="empty-panel"><span class="empty-glyph">↩</span><h3>Reverse DNS unavailable</h3><p>${esc(module.error)}</p>${safeLink(module.source || "https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/", "DNS provider")}</div>`;
+  return `<div class="tab-intro"><div><span class="eyebrow">PUBLIC REVERSE LOOKUP</span><h2>PTR names</h2><p>${esc(module.address)} · ${esc(module.reverseName)} · checked ${esc(shortDate(module.queriedAt))}</p></div>${safeLink(module.source, "DNS provider")}</div>
+    <div class="notice">${esc(module.notice)}</div>
+    ${module.names?.length ? `<section class="panel record-panel"><ul class="record-list">${module.names.map((name) => `<li><code>${esc(name)}</code></li>`).join("")}</ul></section>` : `<div class="empty-panel compact-empty"><h3>No PTR answer returned</h3><p>This address range has no public reverse-DNS name for the queried address.</p></div>`}
+    ${sourceCards({ modules: { reverseDns: module } })}`;
 }
 
 function toolsDirectory() {
@@ -373,10 +424,10 @@ function toolsDirectory() {
     ${externalSourcesPanel()}
     <section class="panel tool-workbench"><div class="panel-heading"><div><span class="eyebrow">LOCAL FILE PRIVACY CHECK</span><h3>Inspect file metadata</h3></div><span class="panel-caption">JPEG · PNG · TIFF · PDF · DOCX</span></div>
       <p class="tool-copy">Choose a file you own or have permission to inspect. It is sent only to this machine's local app server, parsed in memory, and not saved.</p>
-      <div class="file-audit-controls"><label class="file-picker">Choose local file<input id="metadata-file" type="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.pdf,.docx,image/jpeg,image/png,image/tiff,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" /></label><label class="scope-check-inline"><input type="checkbox" id="metadata-scope" /><span class="custom-check"></span><span>This is my file or I have permission</span></label><button class="secondary-button" data-action="audit-metadata" ${state.metadataBusy ? "disabled" : ""}>${state.metadataBusy ? "Inspecting…" : "Inspect metadata"}</button></div>
+      <div class="file-audit-controls"><label class="file-picker">Choose local file<input id="metadata-file" type="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.pdf,.docx,image/jpeg,image/png,image/tiff,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" ${state.metadataBusy ? "disabled" : ""} /></label><label class="scope-check-inline"><input type="checkbox" id="metadata-scope" ${state.metadataBusy ? "disabled" : ""} /><span class="custom-check"></span><span>This is my file or I have permission</span></label><button class="secondary-button" data-action="audit-metadata" ${state.metadataBusy ? "disabled" : ""}>${state.metadataBusy ? "Inspecting…" : "Inspect metadata"}</button></div>
       ${state.metadataResult ? metadataResults(state.metadataResult) : ""}
     </section>
-    ${state.flash ? `<div class="flash-message" role="status">${esc(state.flash)}</div>` : ""}`;
+    ${flashMessage()}`;
 }
 
 function externalSourcesPanel() {
@@ -440,13 +491,15 @@ function externalSourceUrl(source, rawQuery) {
 }
 
 function metadataResults(result) {
-  return `<div class="metadata-result"><div class="metadata-result-head"><div><span class="eyebrow">LOCAL FILE RESULT</span><b>${esc(result.filename)}</b><small>${result.fields.length} metadata field${result.fields.length === 1 ? "" : "s"} · ${esc(shortDate(result.queriedAt))}</small></div><span class="status-badge available"><i></i>Not saved</span></div><div class="metadata-fields">${result.fields.map((field) => `<div class="detail-row"><span>${esc(field.tag)}</span><b>${esc(Array.isArray(field.value) ? field.value.join(", ") : field.value)}</b></div>`).join("") || `<span class="subtle-note">No readable metadata fields found.</span>`}</div><p class="import-footnote">${esc(result.notice)}</p></div>`;
+  return `<div class="metadata-result"><div class="metadata-result-head"><div><span class="eyebrow">LOCAL FILE RESULT</span><b>${esc(result.filename)}</b><small>${result.fields.length} metadata field${result.fields.length === 1 ? "" : "s"} · ${esc(shortDate(result.queriedAt))}</small></div><span class="status-badge available"><i></i>Not saved</span></div><div class="metadata-fields">${result.fields.map((field) => `<div class="detail-row"><span>${esc(field.tag)}</span><b>${esc(Array.isArray(field.value) ? field.value.join(", ") : field.value)}</b></div>`).join("") || `<span class="subtle-note">This parser found no fields it recognizes. The file may still contain metadata outside the supported formats.</span>`}</div><p class="import-footnote">${esc(result.notice)}</p></div>`;
 }
 
 function contentFor(record) {
+  if (state.tab === "history") return historyContent(record);
   if (state.tab === "accounts") return accountsContent(record);
   if (state.tab === "email") return emailAuditContent(record);
   if (state.tab === "phone") return phoneContent(record);
+  if (state.tab === "ptr") return ptrContent(record);
   if (state.tab === "subdomains") return subdomainsContent(record);
   if (state.tab === "dns") return dnsContent(record);
   if (state.tab === "certificates") return certificatesContent(record);
@@ -458,15 +511,65 @@ function contentFor(record) {
 function caseList() {
   if (!state.cases.length) return `<div class="case-list-empty">Your saved cases<br /><span>will appear here.</span></div>`;
   return state.cases.map((record) => `
-    <button class="case-item ${record.id === state.selectedCaseId ? "active" : ""}" data-case-id="${esc(record.id)}">
-      <span class="case-avatar">${esc((record.query || "?").slice(0, 1).toUpperCase())}</span>
-      <span class="case-item-copy"><b>${esc(record.query)}</b><small>${esc((record.result.entity?.type || "subject").toUpperCase())} · ${esc(shortDate(record.updatedAt))}</small></span>
+    <button class="case-item ${record.id === state.selectedCaseId ? "active" : ""}" data-case-id="${esc(record.id)}" aria-pressed="${record.id === state.selectedCaseId}">
+      <span class="case-avatar">${esc(caseSubjectLabel(record).slice(0, 1).toUpperCase())}</span>
+      <span class="case-item-copy"><b>${esc(caseSubjectLabel(record))}</b><small>${esc((record.result.entity?.type || "subject").toUpperCase())} · ${esc(shortDate(record.updatedAt))}</small></span>
       <span class="case-arrow">›</span>
     </button>`).join("");
 }
 
+function caseSubjectLabel(record) {
+  const entity = record.result?.entity || {};
+  if (entity.type === "email") {
+    const [local, domain] = String(entity.value || record.query || "").split("@", 2);
+    return local && domain ? `${local.slice(0, 1)}•••@${domain}` : "••• email";
+  }
+  if (entity.type === "phone") {
+    const value = String(entity.value || record.query || "");
+    return value.length > 6 ? `${value.slice(0, 3)}••••${value.slice(-2)}` : "•••• phone";
+  }
+  return record.query || "Untitled case";
+}
+
+function summarizeResult(result) {
+  const modules = result?.modules || {};
+  const metrics = {};
+  if (modules.dns) {
+    const answers = Object.values(modules.dns.records || {}).reduce((total, rows) => total + (Array.isArray(rows) ? rows.length : 0), 0);
+    metrics["DNS answers"] = String(answers);
+    metrics["DNS status"] = modules.dns.status || "unknown";
+  }
+  if (modules.certificates) metrics["Certificate names"] = String(modules.certificates.names?.length ?? 0);
+  if (modules.subdomains) metrics["Discovered hosts"] = `${modules.subdomains.totalFound ?? modules.subdomains.hosts?.length ?? 0} (${modules.subdomains.resolvedCount ?? 0} resolved)`;
+  if (modules.registration) metrics["RDAP status"] = modules.registration.status || "unknown";
+  if (modules.reverseDns) metrics["PTR names"] = String(modules.reverseDns.names?.length ?? 0);
+  if (modules.accounts) metrics["Profile checks"] = `${modules.accounts.found ?? 0} possible · ${modules.accounts.notFound ?? 0} absent · ${modules.accounts.unknown ?? 0} unknown`;
+  if (modules.emailAudit) metrics["Mail DNS"] = `MX ${modules.emailAudit.mxStatus} · SPF ${modules.emailAudit.spfStatus} · DMARC ${modules.emailAudit.dmarcStatus}`;
+  if (modules.phoneValidation) metrics["Phone check"] = modules.phoneValidation.validShape ? "E.164 shape valid" : "Invalid shape";
+  if (modules.imports?.length) metrics["Imported reports"] = String(modules.imports.length);
+  return { generatedAt: result?.generatedAt || new Date().toISOString(), metrics };
+}
+
+function historyContent(record) {
+  const history = Array.isArray(record.history) ? record.history : [];
+  if (!history.length) return `<div class="empty-panel compact-empty"><h3>No earlier collection yet</h3><p>Refresh this case to save a compact summary and compare module counts with the previous run.</p></div>`;
+  const latest = history[0];
+  const current = summarizeResult(record.result);
+  const keys = [...new Set([...Object.keys(latest.metrics || {}), ...Object.keys(current.metrics || {})])];
+  return `<div class="tab-intro"><div><span class="eyebrow">REFRESH COMPARISON</span><h2>Collection history</h2><p>Latest saved snapshot ${esc(shortDate(latest.generatedAt))} · ${history.length} of 5 summaries retained</p></div></div>
+    <div class="notice">This view compares compact module summaries. It does not retain old raw records or prove why a source changed.</div>
+    <div class="panel table-panel"><table><thead><tr><th>Module summary</th><th>Previous run</th><th>Current run</th></tr></thead><tbody>${keys.map((key) => `<tr><td>${esc(key)}</td><td>${esc(latest.metrics?.[key] ?? "—")}</td><td>${esc(current.metrics?.[key] ?? "—")}</td></tr>`).join("") || `<tr><td colspan="3">No comparable module summaries.</td></tr>`}</tbody></table></div>
+    ${history.length > 1 ? `<section class="panel history-list"><div class="panel-heading"><div><span class="eyebrow">OLDER RUNS</span><h3>Recent snapshots</h3></div></div>${history.slice(1).map((snapshot, index) => `<div class="history-item"><b>Run ${index + 2}</b><time>${esc(shortDate(snapshot.generatedAt))}</time><span>${esc(Object.entries(snapshot.metrics || {}).map(([key, value]) => `${key}: ${value}`).join(" · ") || "No summary")}</span></div>`).join("")}</section>` : ""}`;
+}
+
 function tabButton(tab, title, icon, disabled = false) {
-  return `<button class="result-tab ${state.tab === tab ? "active" : ""}" data-tab="${tab}" ${disabled ? "disabled" : ""}><span>${icon}</span>${title}</button>`;
+  return `<button class="result-tab ${state.tab === tab ? "active" : ""}" data-tab="${tab}" aria-pressed="${state.tab === tab}" aria-controls="result-view" ${disabled ? "disabled" : ""}><span aria-hidden="true">${icon}</span>${title}</button>`;
+}
+
+function flashMessage() {
+  if (!state.flash) return "";
+  const success = /^(Case updated\.|\d+ in-scope infrastructure finding|Opened )/.test(state.flash);
+  return `<div class="flash-message ${success ? "success" : "error"}" role="${success ? "status" : "alert"}">${esc(state.flash)}</div>`;
 }
 
 function render() {
@@ -476,6 +579,7 @@ function render() {
   const username = entityType === "username";
   const email = entityType === "email";
   const phone = entityType === "phone";
+  const ip = entityType === "ip";
   const inTools = state.view === "tools";
   ROOT.innerHTML = `
     <div class="app-shell">
@@ -488,19 +592,20 @@ function render() {
         <button class="side-link ${inTools ? "selected" : ""}" data-action="open-tools"><span class="side-icon">⌘</span>Built-in modules${inTools ? `<span class="nav-dot"></span>` : ""}</button>
         <div class="case-section-heading"><span class="side-label">RECENT CASES</span><span class="case-count">${state.cases.length}</span></div>
         <div class="case-list">${caseList()}</div>
-        <div class="sidebar-bottom"><div class="local-indicator"><i></i><span>Local workspace</span></div><p>Cases are stored in this browser. No account required.</p><div class="version-label">UWU OSINT <span>0.1.0</span></div></div>
+        <div class="sidebar-bottom"><div class="local-indicator"><i></i><span>Local workspace</span></div><p>Cases are stored in this browser. No account required.</p>${state.cases.length ? `<button class="clear-cases-button" data-action="clear-cases">Clear saved cases</button>` : ""}<div class="version-label">UWU OSINT <span>0.1.0</span></div></div>
       </aside>
       <main class="main-content">
-        <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>${!inTools && phone ? "LOCAL FORMAT CHECK" : !inTools && email ? "DOMAIN-ONLY SOURCE QUERIES" : "PUBLIC SOURCE QUERIES"}</span>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
+        <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>${!inTools && phone ? "LOCAL FORMAT CHECK" : !inTools && email ? "DOMAIN-ONLY SOURCE QUERIES" : "PUBLIC SOURCE QUERIES"}</span><div class="mobile-case-tools">${!inTools && state.cases.length ? `<label class="sr-only" for="mobile-case-select">Switch saved case</label><select id="mobile-case-select"><option value="" ${record ? "" : "selected"}>New case</option>${state.cases.map((item) => `<option value="${esc(item.id)}" ${item.id === record?.id ? "selected" : ""}>${esc(caseSubjectLabel(item))}</option>`).join("")}</select>` : ""}<button data-action="new-case">＋ New</button>${state.cases.length ? `<button class="mobile-clear-cases" data-action="clear-cases" aria-label="Clear all saved cases" title="Clear all saved cases">Clear</button>` : ""}</div>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
         <div class="content-wrap">
           <section class="page-heading"><div><span class="eyebrow">${inTools ? "NATIVE RESEARCH MODULES" : `INTELLIGENCE / ${record ? esc(record.result.entity?.type?.toUpperCase()) : "START HERE"}`}</span><h1>${inTools ? `Research <em>modules.</em>` : `Public surface <em>research.</em>`}</h1><p>${inTools ? "Built-in collection, local file inspection, and report interchange." : "Research public infrastructure, self-audit accounts, review email-domain DNS, and validate phone format locally."}</p></div><div class="heading-ornament"><div class="ornament-ring ring-one"></div><div class="ornament-ring ring-two"></div><div class="ornament-core">uwu</div></div></section>
           ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(username ? `@${record.result.entity.value}` : record?.query || "")}" placeholder="Domain · IP · ASN · @username · email · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email domain · E.164 phone format</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>`}
-          ${state.flash && !inTools ? `<div class="flash-message" role="status">${esc(state.flash)}</div>` : ""}
+          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(username ? `@${record.result.entity.value}` : record?.query || "")}" placeholder="Domain · IP · ASN · @username · email · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email domain · E.164 phone format</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>${privacyDisclosure(record)}`}
+          ${inTools ? "" : flashMessage()}
           ${inTools ? toolsDirectory() : record ? `
             <section class="case-title-row"><div><div class="subject-line"><span class="subject-dot"></span><h2>${esc(record.query)}</h2><span class="type-tag">${esc(record.result.entity?.type || "subject")}</span></div><p>Case opened ${esc(shortDate(record.createdAt))} <span class="middle-dot">·</span> Refreshed ${esc(shortDate(record.updatedAt))}</p></div><button class="delete-button" data-action="delete-case">Delete case <span>×</span></button></section>
-            <nav class="result-tabs" aria-label="Case views">${tabButton("overview", "Overview", "◫")}${username ? tabButton("accounts", "Account footprint", "◎") : ""}${email ? tabButton("email", "Email domain", "✉") : ""}${phone ? tabButton("phone", "Phone format", "+") : ""}${domain || email ? tabButton("dns", "DNS records", "⌁") : ""}${domain ? tabButton("certificates", "Certificates", "▤") : ""}${domain ? tabButton("subdomains", "Subdomain map", "⌘") : ""}${!username && !phone ? tabButton("registration", "Registration", "◈") : ""}${tabButton("imports", "Imported reports", "⇧")}</nav>
-            <div class="result-content">${contentFor(record)}</div>
-          ` : `<section class="welcome-grid"><article class="welcome-card"><div class="welcome-icon">⌁</div><span class="eyebrow">01 / COLLECT</span><h2>Start with a scoped subject</h2><p>Enter a domain or URL, public IP, ASN, username, email, or international phone number for an account or asset you may research.</p><div class="welcome-example"><span>TRY A FORMAT</span><code>example.com · @handle · +14165550123</code></div></article><article class="welcome-card"><div class="welcome-icon">◈</div><span class="eyebrow">02 / CONNECT</span><h2>Keep the evidence together</h2><p>Each source reports independently. Findings include collection times, provider links, and a private case notebook.</p><div class="welcome-example"><span>CASE STORAGE</span><code>Only in this browser</code></div></article><article class="welcome-card"><div class="welcome-icon">⇩</div><span class="eyebrow">03 / EXPORT</span><h2>Take your work with you</h2><p>Save a case as JSON for your records or for later processing by another research tool.</p><div class="welcome-example"><span>EXPORT FORMAT</span><code>JSON · source-linked</code></div></article></section>
+            <nav class="result-tabs" aria-label="Case views">${tabButton("overview", "Overview", "◫")}${username ? tabButton("accounts", "Account footprint", "◎") : ""}${email ? tabButton("email", "Email domain", "✉") : ""}${phone ? tabButton("phone", "Phone format", "+") : ""}${ip ? tabButton("ptr", "Reverse DNS", "↩") : ""}${domain || email ? tabButton("dns", "DNS records", "⌁") : ""}${domain ? tabButton("certificates", "Certificates", "▤") : ""}${domain ? tabButton("subdomains", "Subdomain map", "⌘") : ""}${!username && !phone ? tabButton("registration", "Registration", "◈") : ""}${tabButton("imports", "Imported reports", "⇧")}${tabButton("history", "History", "◷")}</nav>
+            <div class="result-content" id="result-view" role="region" aria-live="polite" aria-label="${esc(state.tab)} results">${contentFor(record)}</div>
+          ` : `<section class="welcome-grid"><article class="welcome-card"><div class="welcome-icon">⌁</div><span class="eyebrow">01 / COLLECT</span><h2>Start with a scoped subject</h2><p>Enter a domain or URL, public IP, ASN, username, email, or international phone number for an account or asset you may research.</p><div class="welcome-example"><span>TRY A FORMAT</span><code>iana.org · @handle · +14165550123</code></div></article><article class="welcome-card"><div class="welcome-icon">◈</div><span class="eyebrow">02 / CONNECT</span><h2>Keep the evidence together</h2><p>Each source reports independently. Findings include collection times, provider links, and a private case notebook.</p><div class="welcome-example"><span>CASE STORAGE</span><code>Only in this browser</code></div></article><article class="welcome-card"><div class="welcome-icon">⇩</div><span class="eyebrow">03 / EXPORT</span><h2>Take your work with you</h2><p>Save a case as JSON for your records or for later processing by another research tool.</p><div class="welcome-example"><span>EXPORT FORMAT</span><code>JSON · source-linked</code></div></article></section>
             <section class="getting-started"><div><span class="eyebrow">BUILT FOR CAREFUL RESEARCH</span><h3>Scoped source requests</h3><p>Infrastructure checks use public records. Account self-audits request public profile URLs without signing in.</p></div><div class="provider-chips"><span>Cloudflare DNS</span><span>IANA RDAP</span><span>crt.sh</span><span>Host Search</span></div></section>`}
           <footer class="page-footer"><span>UWU OSINT · LOCAL-FIRST RESEARCH</span><span>Public data can be incomplete or out of date. Verify important findings at their source.</span></footer>
         </div>
@@ -551,6 +656,9 @@ async function investigate(query, authorized, category = "all", existingCaseId =
     const displayQuery = entityType === "username" ? `@${data.entity.value}` : data.entity?.value || query;
     if (record) {
       const savedImports = record.result.modules?.imports || [];
+      if (!Array.isArray(record.history)) record.history = [];
+      record.history.unshift(summarizeResult(record.result));
+      record.history = record.history.slice(0, 5);
       data.modules ||= {};
       if (savedImports.length) data.modules.imports = savedImports;
       record.query = displayQuery;
@@ -809,6 +917,7 @@ async function inspectLocalFile() {
     render();
     return;
   }
+  state.metadataResult = null;
   state.metadataBusy = true;
   state.flash = "";
   render();
@@ -890,6 +999,14 @@ ROOT.addEventListener("click", (event) => {
     state.flash = "";
     render();
     document.querySelector("#query")?.focus();
+  } else if (action === "clear-cases") {
+    if (!state.cases.length || !window.confirm(`Clear all ${state.cases.length} saved case${state.cases.length === 1 ? "" : "s"} from this browser? This also deletes their notes and imported reports.`)) return;
+    state.cases = [];
+    state.selectedCaseId = null;
+    state.tab = "overview";
+    state.flash = "";
+    persistCases();
+    render();
   } else if (action === "export") {
     const record = currentCase();
     if (record) exportCase(record);
@@ -967,6 +1084,18 @@ ROOT.addEventListener("input", (event) => {
 ROOT.addEventListener("change", (event) => {
   if (event.target.matches("#account-category")) state.accountCategory = event.target.value;
   if (event.target.matches("#external-scope")) state.externalAuthorized = event.target.checked;
+  if (event.target.matches("#mobile-case-select")) {
+    state.selectedCaseId = event.target.value || null;
+    state.tab = "overview";
+    state.flash = "";
+    render();
+  }
+  if (event.target.matches("#metadata-file")) {
+    state.metadataResult = null;
+    state.flash = "";
+    document.querySelector(".metadata-result")?.remove();
+    document.querySelector(".flash-message")?.remove();
+  }
 });
 
 render();
