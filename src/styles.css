@@ -275,6 +275,20 @@ tbody tr:hover { background: rgba(255,255,255,.018); }
 .integration-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 11px; padding-top: 8px; border-top: 1px solid rgba(234,228,255,.055); color: #706b7b; font: 9px var(--mono); }
 .tool-workbench { margin-top: 11px; padding: 16px 17px; }
 .tool-workbench .tool-copy { margin: -3px 0 13px; }
+.external-query-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(210px,auto); align-items: end; gap: 12px; margin: 13px 0 12px; }
+.external-query-field { display: grid; gap: 5px; min-width: 0; color: #858093; font: 8px var(--mono); letter-spacing: .65px; }
+.external-query-field input { width: 100%; min-height: 36px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 7px; outline: 0; background: rgba(8,7,12,.35); color: #e4deef; font: 11px var(--sans); letter-spacing: 0; }
+.external-query-field input:focus { border-color: rgba(183,164,255,.55); box-shadow: 0 0 0 2px rgba(183,164,255,.08); }
+.external-query-field input::placeholder { color: #625e6e; }
+.external-scope { min-height: 36px; }
+.external-source-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.external-source-card { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px 12px; padding: 10px 11px; border: 1px solid rgba(234,228,255,.07); border-radius: 8px; background: rgba(8,7,12,.18); }
+.external-source-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.external-source-heading .integration-icon { flex: 0 0 30px; }
+.external-source-heading b { overflow: hidden; color: #d7d1e1; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.external-source-card p { grid-column: 1; margin: 0; color: #817c8c; font-size: 9px; line-height: 1.5; }
+.external-source-card .secondary-button { grid-column: 2; grid-row: 1 / span 2; white-space: nowrap; }
+.external-source-card .secondary-button span { margin-left: 5px; }
 .file-audit-controls, .import-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
 .file-picker { display: inline-flex; align-items: center; min-height: 34px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 7px; background: rgba(255,255,255,.025); color: #b8afcf; font-size: 10px; cursor: pointer; }
 .file-picker:hover { border-color: rgba(183,164,255,.35); background: rgba(183,164,255,.055); }
@@ -430,6 +444,10 @@ tbody tr:hover { background: rgba(255,255,255,.018); }
   .tool-count { justify-items: start; }
   .tool-card-grid { grid-template-columns: 1fr; }
   .file-audit-controls, .import-controls { align-items: stretch; flex-direction: column; }
+  .external-query-row { grid-template-columns: 1fr; gap: 5px; }
+  .external-scope { min-height: 30px; }
+  .external-source-grid { grid-template-columns: 1fr; }
+  .external-source-card .secondary-button { width: auto; }
   .file-picker, .secondary-button, .tool-workbench select { justify-content: center; width: 100%; }
   .scope-check-inline { min-height: 30px; }
 }

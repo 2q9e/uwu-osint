@@ -22,6 +22,8 @@ const state = {
   accountCategory: "all",
   metadataBusy: false,
   metadataResult: null,
+  externalQuery: "",
+  externalAuthorized: false,
 };
 
 state.selectedCaseId = state.cases[0]?.id ?? null;
@@ -298,12 +300,70 @@ function toolsDirectory() {
   ];
   return `<section class="tool-intro"><div><span class="eyebrow">NATIVE RESEARCH MODULES</span><h2>One workspace for public signals.</h2><p>Each module works with bounded collection, source attribution, and results kept in the local case workspace.</p></div><div class="tool-count"><strong>${cards.length}</strong><span>built-in modules</span></div></section>
     <section class="tool-card-grid">${cards.map((card) => `<article class="panel integration-card"><div class="integration-top"><span class="integration-icon">${card.icon}</span><span class="integration-status ready"><i></i>READY</span></div><span class="eyebrow">${card.category}</span><h3>${card.title}</h3><p>${card.detail}</p><div class="integration-footer"><span>Built in</span></div></article>`).join("")}</section>
+    ${externalSourcesPanel()}
     <section class="panel tool-workbench"><div class="panel-heading"><div><span class="eyebrow">LOCAL FILE PRIVACY CHECK</span><h3>Inspect file metadata</h3></div><span class="panel-caption">JPEG · PNG · TIFF · PDF · DOCX</span></div>
       <p class="tool-copy">Choose a file you own or have permission to inspect. It is sent only to this machine's local app server, parsed in memory, and not saved.</p>
       <div class="file-audit-controls"><label class="file-picker">Choose local file<input id="metadata-file" type="file" accept=".jpg,.jpeg,.png,.tif,.tiff,.pdf,.docx,image/jpeg,image/png,image/tiff,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" /></label><label class="scope-check-inline"><input type="checkbox" id="metadata-scope" /><span class="custom-check"></span><span>This is my file or I have permission</span></label><button class="secondary-button" data-action="audit-metadata" ${state.metadataBusy ? "disabled" : ""}>${state.metadataBusy ? "Inspecting…" : "Inspect metadata"}</button></div>
       ${state.metadataResult ? metadataResults(state.metadataResult) : ""}
     </section>
     ${state.flash ? `<div class="flash-message" role="status">${esc(state.flash)}</div>` : ""}`;
+}
+
+function externalSourcesPanel() {
+  const sources = [
+    { id: "otx", name: "AlienVault OTX", detail: "Threat intelligence for domains, IP addresses, and URLs.", action: "Search indicator", icon: "◈" },
+    { id: "epieos", name: "Epieos", detail: "Open Epieos for a manual email search; the app does not submit the address.", action: "Open Epieos", icon: "◎" },
+    { id: "opencorporates", name: "OpenCorporates", detail: "Search public company and registry records by name.", action: "Search companies", icon: "▦" },
+    { id: "academictorrents", name: "Academic Torrents", detail: "Search the academic dataset catalogue.", action: "Search datasets", icon: "▤" },
+  ];
+  return `<section class="panel tool-workbench external-source-workbench">
+    <div class="panel-heading"><div><span class="eyebrow">CONNECTED PUBLIC SOURCES</span><h3>Search external sources</h3></div><span class="panel-caption">Opens provider pages</span></div>
+    <p class="tool-copy">Enter a query, confirm authorization, then open one provider. OTX, OpenCorporates, and Academic Torrents receive the query. Epieos opens without it so you can search manually there.</p>
+    <div class="external-query-row">
+      <label class="external-query-field" for="external-query"><span>SEARCH QUERY</span><input id="external-query" type="text" maxlength="300" value="${esc(state.externalQuery)}" placeholder="Domain, IP, email, company, or dataset topic" autocomplete="off" /></label>
+      <label class="scope-check-inline external-scope"><input type="checkbox" id="external-scope" ${state.externalAuthorized ? "checked" : ""} /><span class="custom-check"></span><span>I’m authorized to send this query to the selected source</span></label>
+    </div>
+    <div class="external-source-grid">${sources.map((source) => `<article class="external-source-card"><div class="external-source-heading"><span class="integration-icon">${source.icon}</span><b>${source.name}</b></div><p>${source.detail}</p><button class="secondary-button" data-action="external-search" data-source="${source.id}">${source.action} <span aria-hidden="true">↗</span></button></article>`).join("")}</div>
+    <p class="import-footnote">Only one source opens per click. Epieos searches are entered on its site; this app does not submit or automate those searches.</p>
+  </section>`;
+}
+
+function externalSourceUrl(source, rawQuery) {
+  const query = rawQuery.trim();
+  if (!query || query.length > 300) throw new Error("Enter a search query up to 300 characters.");
+  if (source === "otx") {
+    let kind = "domain";
+    let value = query;
+    if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(query)) {
+      kind = "ip";
+    } else if (query.includes(":")) {
+      try { new URL(`http://[${query}]/`); kind = "ip"; } catch { throw new Error("Enter a valid domain, public IP, or URL for OTX."); }
+    } else if (/^https?:\/\//i.test(query)) {
+      try {
+        const parsed = new URL(query);
+        if (!parsed.hostname || !["http:", "https:"].includes(parsed.protocol)) throw new Error();
+        kind = "url";
+      } catch { throw new Error("Enter a valid domain, public IP, or URL for OTX."); }
+    } else if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(query)) {
+      throw new Error("Enter a valid domain, public IP, or URL for OTX.");
+    }
+    return `https://otx.alienvault.com/indicator/${kind}/${encodeURIComponent(value)}`;
+  }
+  if (source === "epieos") {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(query)) throw new Error("Epieos search requires an email address.");
+    return "https://epieos.com/?r=1";
+  }
+  if (source === "opencorporates") {
+    const url = new URL("https://opencorporates.com/companies");
+    url.searchParams.set("q", query);
+    return url.href;
+  }
+  if (source === "academictorrents") {
+    const url = new URL("https://academictorrents.com/browse.php");
+    url.searchParams.set("search", query);
+    return url.href;
+  }
+  throw new Error("Unknown external source.");
 }
 
 function metadataResults(result) {
@@ -776,10 +836,33 @@ ROOT.addEventListener("click", (event) => {
     importReport();
   } else if (action === "audit-metadata") {
     inspectLocalFile();
+  } else if (action === "external-search") {
+    const query = document.querySelector("#external-query")?.value || state.externalQuery;
+    const authorized = document.querySelector("#external-scope")?.checked;
+    if (!authorized) {
+      state.flash = "Confirm authorization before sending this query to an external source.";
+    } else {
+      try {
+        const source = actionButton.dataset.source;
+        const sourceNames = { otx: "AlienVault OTX", epieos: "Epieos", opencorporates: "OpenCorporates", academictorrents: "Academic Torrents" };
+        const url = externalSourceUrl(source, query);
+        window.open(url, "_blank", "noopener,noreferrer");
+        state.flash = source === "epieos"
+          ? "Opened Epieos. Enter the email on its site to search; this app does not submit or save it."
+          : `Opened ${sourceNames[source]} in a new tab. The provider receives the query; results are not saved here.`;
+      } catch (error) {
+        state.flash = error.message;
+      }
+    }
+    render();
   }
 });
 
 ROOT.addEventListener("input", (event) => {
+  if (event.target.matches("#external-query")) {
+    state.externalQuery = event.target.value;
+    return;
+  }
   if (event.target.matches("#query")) {
     const isUsername = /^(?:@|username:)/i.test(event.target.value.trim());
     const filter = document.querySelector("#account-filter");
@@ -797,6 +880,7 @@ ROOT.addEventListener("input", (event) => {
 
 ROOT.addEventListener("change", (event) => {
   if (event.target.matches("#account-category")) state.accountCategory = event.target.value;
+  if (event.target.matches("#external-scope")) state.externalAuthorized = event.target.checked;
 });
 
 render();
