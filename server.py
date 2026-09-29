@@ -323,7 +323,7 @@ def query_dns(name: str, record_type: str) -> dict:
     if not isinstance(data, dict):
         raise LookupError("The DNS source returned an unexpected record.")
     response_code = data.get("Status")
-        if type(response_code) is not int:
+    if type(response_code) is not int:
         raise LookupError("The DNS source returned no valid response code.")
     if response_code != 0:
         descriptions = {1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
