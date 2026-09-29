@@ -353,7 +353,7 @@ function render() {
         <div class="sidebar-bottom"><div class="local-indicator"><i></i><span>Local workspace</span></div><p>Cases are stored in this browser. No account required.</p><div class="version-label">UWU OSINT <span>0.1.0</span></div></div>
       </aside>
       <main class="main-content">
-        <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>PUBLIC SOURCE QUERIES</span>${record && !inTools ? `<button class="icon-button" data-action="export" title="Export current case" aria-label="Export current case">⇩</button>` : ""}</div></header>
+        <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>PUBLIC SOURCE QUERIES</span>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
         <div class="content-wrap">
           <section class="page-heading"><div><span class="eyebrow">${inTools ? "NATIVE RESEARCH MODULES" : `INTELLIGENCE / ${record ? esc(record.result.entity?.type?.toUpperCase()) : "START HERE"}`}</span><h1>${inTools ? `Research <em>modules.</em>` : `Public surface <em>research.</em>`}</h1><p>${inTools ? "Built-in collection, local file inspection, and report interchange." : "Bring public infrastructure and self-audit signals into one source-linked workspace."}</p></div><div class="heading-ornament"><div class="ornament-ring ring-one"></div><div class="ornament-ring ring-two"></div><div class="ornament-core">uwu</div></div></section>
           ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(username ? `@${record.result.entity.value}` : record?.query || "")}" placeholder="example.com, public IP, AS15169, or @username" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain · public IP · ASN · self-audit username</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account or asset, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>`}
@@ -392,7 +392,7 @@ async function populateAccountCategories() {
   }
 }
 
-async function investigate(query, authorized, category = "all") {
+async function investigate(query, authorized, category = "all", existingCaseId = null) {
   state.busy = true;
   state.flash = "";
   render();
@@ -405,16 +405,33 @@ async function investigate(query, authorized, category = "all") {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "The lookup could not be completed.");
     const timestamp = data.generatedAt || new Date().toISOString();
-    const record = {
-      id: globalThis.crypto?.randomUUID?.() || `case-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      query: data.entity?.type === "username" ? `@${data.entity.value}` : data.entity?.value || query,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      notes: "",
-      result: data,
-    };
-    state.cases.unshift(record);
-    state.selectedCaseId = record.id;
+    const entityType = data.entity?.type || "subject";
+    const entityValue = String(data.entity?.value || query).toLowerCase();
+    const record = state.cases.find((item) => item.id === existingCaseId)
+      || state.cases.find((item) => item.result.entity?.type === entityType
+        && String(item.result.entity?.value || "").toLowerCase() === entityValue);
+    const displayQuery = entityType === "username" ? `@${data.entity.value}` : data.entity?.value || query;
+    if (record) {
+      const savedImports = record.result.modules?.imports || [];
+      data.modules ||= {};
+      if (savedImports.length) data.modules.imports = savedImports;
+      record.query = displayQuery;
+      record.updatedAt = timestamp;
+      record.result = data;
+      state.flash = "Case updated. Your notes and imported reports were preserved.";
+    } else {
+      const newRecord = {
+        id: globalThis.crypto?.randomUUID?.() || `case-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        query: displayQuery,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        notes: "",
+        result: data,
+      };
+      state.cases.unshift(newRecord);
+      state.selectedCaseId = newRecord.id;
+    }
+    if (record) state.selectedCaseId = record.id;
     state.tab = "overview";
     persistCases();
   } catch (error) {
@@ -431,6 +448,56 @@ function exportCase(record) {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = `uwu-osint-${(record.query || "case").replace(/[^a-z0-9.-]+/gi, "-")}.json`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(value) {
+  let text = String(value ?? "");
+  if (/^[\t\r\n ]*[=+@-]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function exportEvidenceCsv(record) {
+  const modules = record.result.modules || {};
+  const rows = [["subject", "entity_type", "finding_type", "value", "source", "collected_at", "details"]];
+  const add = (type, value, source, collectedAt, details = "") => {
+    if (value == null || value === "") return;
+    rows.push([record.query, record.result.entity?.type || "subject", type, value, source, collectedAt || "", details]);
+  };
+
+  for (const [recordType, answers] of Object.entries(modules.dns?.records || {})) {
+    for (const answer of answers || []) add(`DNS ${recordType}`, answer.data, "Cloudflare DNS", modules.dns.queriedAt, answer.ttl == null ? "" : `TTL ${answer.ttl}s`);
+  }
+  const registry = modules.registration || {};
+  add("Registry network type", registry.networkType, "IANA RDAP", registry.queriedAt);
+  add("Registry country", registry.country, "IANA RDAP", registry.queriedAt);
+  if (registry.startAddress || registry.endAddress) add("Registry address range", [registry.startAddress, registry.endAddress].filter(Boolean).join(" – "), "IANA RDAP", registry.queriedAt);
+  for (const cidr of registry.cidrs || []) add("Registry CIDR", cidr, "IANA RDAP", registry.queriedAt);
+  if (registry.startAutnum != null) add("Registry ASN range", `AS${registry.startAutnum} – AS${registry.endAutnum}`, "IANA RDAP", registry.queriedAt);
+  for (const nameserver of registry.nameservers || []) add("Registered nameserver", nameserver, "IANA RDAP", registry.queriedAt);
+  for (const certificate of modules.certificates?.names || []) {
+    add("Certificate name", certificate.name, "crt.sh", modules.certificates.queriedAt, certificate.firstSeen ? `First seen ${certificate.firstSeen}` : "");
+  }
+  for (const host of modules.subdomains?.hosts || []) {
+    const providers = (host.sources || []).join(", ") || "Passive host discovery";
+    add("Subdomain", host.name, providers, modules.subdomains.queriedAt);
+    for (const address of host.addresses || []) add("Resolved address", address, providers, modules.subdomains.queriedAt, host.name);
+  }
+  for (const site of modules.accounts?.sites || []) {
+    add(`Profile ${site.status}`, site.url || site.site, "Public profile check", modules.accounts.queriedAt, site.category || "");
+  }
+  for (const report of modules.imports || []) {
+    for (const finding of report.findings || []) add(`Imported ${finding.type}`, finding.value, report.tool || "Imported report", report.queriedAt, "In-scope infrastructure finding");
+  }
+
+  const content = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `uwu-osint-${(record.query || "case").replace(/[^a-z0-9.-]+/gi, "-")}-evidence.csv`;
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
@@ -680,6 +747,23 @@ ROOT.addEventListener("click", (event) => {
   } else if (action === "export") {
     const record = currentCase();
     if (record) exportCase(record);
+  } else if (action === "export-csv") {
+    const record = currentCase();
+    if (record) exportEvidenceCsv(record);
+  } else if (action === "refresh-case") {
+    const record = currentCase();
+    if (!record) return;
+    const authorized = document.querySelector("[name=scope]")?.checked;
+    if (!authorized) {
+      state.flash = "Confirm authorization in the checkbox above before refreshing this case.";
+      render();
+      document.querySelector("[name=scope]")?.focus();
+      return;
+    }
+    const category = record.result.entity?.type === "username"
+      ? record.result.modules?.accounts?.category || "all"
+      : "all";
+    investigate(record.query, true, category, record.id);
   } else if (action === "delete-case") {
     const record = currentCase();
     if (!record || !window.confirm(`Delete the local case for ${record.query}?`)) return;

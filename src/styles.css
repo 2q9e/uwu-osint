@@ -102,6 +102,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .passive-label i { width: 5px; height: 5px; }
 .icon-button { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid var(--border-strong); border-radius: 8px; background: #14121c; color: #d1c6fb; font-size: 17px; }
 .icon-button:hover { border-color: rgba(183,164,255,.45); background: rgba(183,164,255,.1); }
+.icon-button:disabled { cursor: wait; opacity: .55; }
 
 .content-wrap { width: min(1140px, 100%); margin: 0 auto; padding: 39px 44px 24px; }
 .page-heading { position: relative; display: flex; align-items: center; justify-content: space-between; min-height: 124px; overflow: hidden; }
@@ -377,8 +378,11 @@ tbody tr:hover { background: rgba(255,255,255,.018); }
   .brand-lockup small { font-size: 7px; }
   .sidebar-rule, .side-label, .side-link, .case-section-heading, .case-list, .sidebar-bottom { display: none; }
   .topbar { position: relative; height: 44px; padding: 0 14px; border-bottom: 0; background: transparent; }
-  .breadcrumb { font-size: 10px; }
-  .passive-label { font-size: 8px; }
+  .breadcrumb { gap: 6px; font-size: 9px; }
+  .topbar-actions { gap: 5px; }
+  .topbar-view-switch { padding: 5px 7px; font-size: 9px; }
+  .passive-label { display: none; }
+  .icon-button { width: 27px; height: 27px; }
   .content-wrap { padding: 10px 14px 18px; }
   .page-heading { min-height: 100px; }
   .page-heading h1 { max-width: 280px; font-size: 28px; }
