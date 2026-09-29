@@ -78,6 +78,7 @@ function sourcesFor(result) {
   const modules = result?.modules ?? {};
   const sources = [];
   if (modules.dns) sources.push({ title: "DNS over HTTPS", name: "Cloudflare", module: modules.dns, icon: "⌁" });
+  if (modules.emailAudit) sources.push({ title: "Mail-domain policy records", name: "Cloudflare", module: modules.emailAudit, icon: "✉" });
   if (modules.certificates) sources.push({ title: "Certificate transparency", name: "crt.sh", module: modules.certificates, icon: "▤" });
   if (modules.registration) sources.push({ title: "Registration data", name: "IANA RDAP", module: modules.registration, icon: "◈" });
   if (modules.subdomains) {
@@ -123,6 +124,8 @@ function overviewContent(record) {
   const result = record.result;
   const modules = result.modules ?? {};
   if (result.entity?.type === "username") return accountOverview(record);
+  if (result.entity?.type === "email") return emailOverview(record);
+  if (result.entity?.type === "phone") return phoneOverview(record);
   const domain = result.entity?.type === "domain";
   const certCount = modules.certificates?.names?.length ?? 0;
   const hostCount = modules.subdomains?.totalFound ?? 0;
@@ -162,6 +165,47 @@ function overviewContent(record) {
     </section>
     ${notesPanel(record)}
   `;
+}
+
+function emailOverview(record) {
+  const modules = record.result.modules || {};
+  const audit = modules.emailAudit;
+  const dnsCount = countDns(modules.dns);
+  const registration = modules.registration;
+  const emailDomain = record.result.entity?.domain || "";
+  const policy = (value) => value === "published" ? "Published" : value === "missing" ? "No record" : "Unknown";
+  return `<div class="notice warning-notice">Email address is stored in this browser case. Network requests use only <code>${esc(emailDomain)}</code>; the full address is not sent to public DNS or registry sources.</div>
+    <div class="metrics-grid">
+      <article class="metric-card"><span class="metric-label">DNS answers</span><strong>${dnsCount}</strong><span class="metric-foot">For the email domain only</span></article>
+      <article class="metric-card"><span class="metric-label">MX records</span><strong class="metric-word">${esc(policy(audit?.mxStatus))}</strong><span class="metric-foot">Mail routing published in DNS</span></article>
+      <article class="metric-card"><span class="metric-label">SPF policy</span><strong class="metric-word">${esc(policy(audit?.spfStatus))}</strong><span class="metric-foot">Sender policy TXT record</span></article>
+      <article class="metric-card"><span class="metric-label">DMARC policy</span><strong class="metric-word">${esc(policy(audit?.dmarcStatus))}</strong><span class="metric-foot">_dmarc TXT record</span></article>
+    </div>
+    <section class="overview-grid">
+      <article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">01 / MAIL DOMAIN</span><h3>Public mail configuration</h3></div><button class="text-button" data-tab="email">View audit <span>→</span></button></div>
+        <div class="detail-list"><div class="detail-row"><span>MX</span><b>${esc(policy(audit?.mxStatus))}</b></div><div class="detail-row"><span>SPF</span><b>${esc(policy(audit?.spfStatus))}</b></div><div class="detail-row"><span>DMARC</span><b>${esc(policy(audit?.dmarcStatus))}</b></div></div>
+      </article>
+      <article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">02 / DOMAIN REGISTRY</span><h3>Registration</h3></div>${registration?.source ? safeLink(registration.source, "RDAP record") : ""}</div>
+        ${registration?.status === "ok" ? registrationPreview(registration, "domain") : `<div class="inline-error">${esc(registration?.error || "Registration lookup is not available.")}</div>`}
+      </article>
+    </section>
+    <div class="notice">${esc(audit?.notice || "This checks public domain DNS only. It does not verify a mailbox or identify its owner.")}</div>
+    <section class="panel sources-panel"><div class="panel-heading"><div><span class="eyebrow">COLLECTION PROVENANCE</span><h3>Sources & timestamps</h3></div><span class="panel-caption">Domain-level records only</span></div>${sourceCards(record.result)}</section>
+    ${notesPanel(record)}`;
+}
+
+function phoneOverview(record) {
+  const validation = record.result.modules?.phoneValidation;
+  return `<div class="notice warning-notice">Phone number is stored in this browser case. This check runs locally and makes no network lookup.</div>
+    <div class="metrics-grid">
+      <article class="metric-card"><span class="metric-label">Format</span><strong class="metric-word">${esc(validation?.format || "E.164")}</strong><span class="metric-foot">International number format</span></article>
+      <article class="metric-card"><span class="metric-label">Shape check</span><strong class="metric-word">${validation?.validShape ? "Valid" : "Unavailable"}</strong><span class="metric-foot">Syntax only, not number assignment</span></article>
+      <article class="metric-card"><span class="metric-label">Digits</span><strong>${esc(validation?.digitCount ?? "—")}</strong><span class="metric-foot">Country code included</span></article>
+      <article class="metric-card"><span class="metric-label">Network requests</span><strong class="metric-word">None</strong><span class="metric-foot">No lookup was performed</span></article>
+    </div>
+    <section class="panel overview-panel account-summary"><div class="panel-heading"><div><span class="eyebrow">LOCAL FORMAT CHECK</span><h3>${esc(validation?.normalized || record.result.entity?.value || "Phone number")}</h3></div><button class="text-button" data-tab="phone">View details <span>→</span></button></div>
+      <p class="account-disclaimer">${esc(validation?.notice || "Syntax only. No subscriber, carrier, location, or account information is queried.")}</p>
+    </section>${notesPanel(record)}`;
 }
 
 function accountOverview(record) {
@@ -291,10 +335,36 @@ function importedContent(record) {
     ${modules.length ? `<div class="import-list">${modules.map((item) => `<section class="panel imported-report"><div class="imported-report-heading"><div><span class="tag">${esc(item.tool)}</span><b>${item.findings.length} finding${item.findings.length === 1 ? "" : "s"}</b></div><span>${esc(shortDate(item.queriedAt))}</span></div>${item.findings.length ? `<ul>${item.findings.slice(0, 500).map((finding) => `<li><span class="tag">${esc(finding.type)}</span><code>${esc(finding.value)}</code></li>`).join("")}</ul>` : `<p class="subtle-note">No in-scope hostname or IP findings were found in that report.</p>`}</section>`).join("")}</div>` : `<div class="empty-panel compact-empty"><h3>No imported reports yet</h3><p>Import JSON, JSONL, or CSV infrastructure output to add scoped findings to this case.</p></div>`}`;
 }
 
+function emailAuditContent(record) {
+  const audit = record.result.modules?.emailAudit;
+  if (!audit) return `<div class="empty-panel"><span class="empty-glyph">✉</span><h3>No email-domain audit</h3><p>Public DNS checks are available for an email’s domain.</p></div>`;
+  const rows = [
+    ["Domain", audit.domain], ["MX status", audit.mxStatus], ["SPF status", audit.spfStatus], ["DMARC status", audit.dmarcStatus],
+  ];
+  const records = [
+    ["MX records", audit.mxRecords], ["SPF records", audit.spfRecords], ["DMARC records", audit.dmarcRecords],
+  ];
+  return `<div class="tab-intro"><div><span class="eyebrow">PUBLIC EMAIL-DOMAIN DNS</span><h2>Mail configuration</h2><p>Checked ${esc(shortDate(audit.queriedAt))} · full address is not queried</p></div>${safeLink(audit.source, "DNS provider")}</div>
+    <div class="notice warning-notice">${esc(audit.notice || "Public domain records only. No mailbox, person, or account lookup is performed.")}</div>
+    <section class="panel registration-details"><div class="detail-list">${rows.map(([key, value]) => `<div class="detail-row"><span>${esc(key)}</span><b>${esc(value || "Unknown")}</b></div>`).join("")}</div></section>
+    <div class="record-grid">${records.map(([title, values]) => `<section class="panel record-panel"><div class="record-heading"><div><span class="record-type">DNS</span><h3>${title}</h3></div><span class="count-tag">${values?.length || 0}</span></div>${values?.length ? `<ul class="record-list">${values.map((item) => `<li><code>${esc(item.data)}</code>${item.ttl != null ? `<span>TTL ${esc(item.ttl)}s</span>` : ""}</li>`).join("")}</ul>` : `<div class="empty-record">No answer returned</div>`}</section>`).join("")}</div>
+    ${audit.dmarcError ? `<div class="notice">DMARC query status: ${esc(audit.dmarcError)}</div>` : ""}${sourceCards(record.result)}`;
+}
+
+function phoneContent(record) {
+  const result = record.result.modules?.phoneValidation;
+  if (!result) return `<div class="empty-panel"><h3>Phone format details unavailable</h3><p>Refresh the case to run a local format check.</p></div>`;
+  return `<div class="tab-intro"><div><span class="eyebrow">LOCAL VALIDATION</span><h2>Phone number format</h2><p>No external provider was contacted.</p></div><span class="status-badge available"><i></i>Syntax valid</span></div>
+    <section class="panel registration-details"><div class="detail-list"><div class="detail-row"><span>Normalized value</span><b>${esc(result.normalized)}</b></div><div class="detail-row"><span>Format</span><b>${esc(result.format)}</b></div><div class="detail-row"><span>Digit count</span><b>${esc(result.digitCount)}</b></div><div class="detail-row"><span>Network requested</span><b>No</b></div></div></section>
+    <div class="notice warning-notice">${esc(result.notice)}</div>`;
+}
+
 function toolsDirectory() {
   const cards = [
     { title: "Domain footprint", category: "PUBLIC INFRASTRUCTURE", detail: "Join DNS answers, registry data, certificate names, and passive hostname results into one scoped view.", icon: "⌘" },
     { title: "Account footprint", category: "SELF-AUDIT", detail: "Check a username you own across a bounded set of public profile URLs. Matches are candidates, not identity proof.", icon: "◎" },
+    { title: "Email domain audit", category: "DOMAIN DNS", detail: "Review MX, SPF, and DMARC records for the domain part of an email. The full address is not sent to DNS or registry sources.", icon: "✉" },
+    { title: "Phone format check", category: "LOCAL VALIDATION", detail: "Normalize an international number to E.164 syntax locally without querying a subscriber, carrier, or location.", icon: "+" },
     { title: "File metadata", category: "LOCAL INSPECTION", detail: "Read common image, PDF, and Office metadata on this machine, including GPS and author fields.", icon: "▧" },
     { title: "Report workspace", category: "INTERCHANGE", detail: "Import common infrastructure reports, filter to the case scope, and discard personal and contact data.", icon: "⇧" },
   ];
@@ -312,13 +382,13 @@ function toolsDirectory() {
 function externalSourcesPanel() {
   const sources = [
     { id: "otx", name: "AlienVault OTX", detail: "Threat intelligence for domains, IP addresses, and URLs.", action: "Search indicator", icon: "◈" },
-    { id: "epieos", name: "Epieos", detail: "Open Epieos for a manual email search; the app does not submit the address.", action: "Open Epieos", icon: "◎" },
+    { id: "epieos", name: "Epieos", detail: "Open Epieos for a manual email or phone search; the app does not submit the value.", action: "Open Epieos", icon: "◎" },
     { id: "opencorporates", name: "OpenCorporates", detail: "Search public company and registry records by name.", action: "Search companies", icon: "▦" },
     { id: "academictorrents", name: "Academic Torrents", detail: "Search the academic dataset catalogue.", action: "Search datasets", icon: "▤" },
   ];
   return `<section class="panel tool-workbench external-source-workbench">
     <div class="panel-heading"><div><span class="eyebrow">CONNECTED PUBLIC SOURCES</span><h3>Search external sources</h3></div><span class="panel-caption">Opens provider pages</span></div>
-    <p class="tool-copy">Enter a query, confirm authorization, then open one provider. OTX, OpenCorporates, and Academic Torrents receive the query. Epieos opens without it so you can search manually there.</p>
+    <p class="tool-copy">Enter a query, confirm authorization, then open one provider. OTX, OpenCorporates, and Academic Torrents receive the query. Epieos opens without it so you can enter an email or phone manually there.</p>
     <div class="external-query-row">
       <label class="external-query-field" for="external-query"><span>SEARCH QUERY</span><input id="external-query" type="text" maxlength="300" value="${esc(state.externalQuery)}" placeholder="Domain, IP, email, company, or dataset topic" autocomplete="off" /></label>
       <label class="scope-check-inline external-scope"><input type="checkbox" id="external-scope" ${state.externalAuthorized ? "checked" : ""} /><span class="custom-check"></span><span>I’m authorized to send this query to the selected source</span></label>
@@ -350,7 +420,10 @@ function externalSourceUrl(source, rawQuery) {
     return `https://otx.alienvault.com/indicator/${kind}/${encodeURIComponent(value)}`;
   }
   if (source === "epieos") {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(query)) throw new Error("Epieos search requires an email address.");
+    const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(query);
+    const compactPhone = query.replace(/[\s().-]/g, "");
+    const phone = /^\+[1-9]\d{1,14}$/.test(compactPhone);
+    if (!email && !phone) throw new Error("Enter an email address or international phone number for a manual Epieos search.");
     return "https://epieos.com/?r=1";
   }
   if (source === "opencorporates") {
@@ -372,6 +445,8 @@ function metadataResults(result) {
 
 function contentFor(record) {
   if (state.tab === "accounts") return accountsContent(record);
+  if (state.tab === "email") return emailAuditContent(record);
+  if (state.tab === "phone") return phoneContent(record);
   if (state.tab === "subdomains") return subdomainsContent(record);
   if (state.tab === "dns") return dnsContent(record);
   if (state.tab === "certificates") return certificatesContent(record);
@@ -396,8 +471,11 @@ function tabButton(tab, title, icon, disabled = false) {
 
 function render() {
   const record = currentCase();
-  const domain = record?.result?.entity?.type === "domain";
-  const username = record?.result?.entity?.type === "username";
+  const entityType = record?.result?.entity?.type;
+  const domain = entityType === "domain";
+  const username = entityType === "username";
+  const email = entityType === "email";
+  const phone = entityType === "phone";
   const inTools = state.view === "tools";
   ROOT.innerHTML = `
     <div class="app-shell">
@@ -413,16 +491,16 @@ function render() {
         <div class="sidebar-bottom"><div class="local-indicator"><i></i><span>Local workspace</span></div><p>Cases are stored in this browser. No account required.</p><div class="version-label">UWU OSINT <span>0.1.0</span></div></div>
       </aside>
       <main class="main-content">
-        <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>PUBLIC SOURCE QUERIES</span>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
+        <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>${!inTools && phone ? "LOCAL FORMAT CHECK" : !inTools && email ? "DOMAIN-ONLY SOURCE QUERIES" : "PUBLIC SOURCE QUERIES"}</span>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
         <div class="content-wrap">
-          <section class="page-heading"><div><span class="eyebrow">${inTools ? "NATIVE RESEARCH MODULES" : `INTELLIGENCE / ${record ? esc(record.result.entity?.type?.toUpperCase()) : "START HERE"}`}</span><h1>${inTools ? `Research <em>modules.</em>` : `Public surface <em>research.</em>`}</h1><p>${inTools ? "Built-in collection, local file inspection, and report interchange." : "Bring public infrastructure and self-audit signals into one source-linked workspace."}</p></div><div class="heading-ornament"><div class="ornament-ring ring-one"></div><div class="ornament-ring ring-two"></div><div class="ornament-core">uwu</div></div></section>
-          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(username ? `@${record.result.entity.value}` : record?.query || "")}" placeholder="example.com, public IP, AS15169, or @username" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain · public IP · ASN · self-audit username</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account or asset, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>`}
+          <section class="page-heading"><div><span class="eyebrow">${inTools ? "NATIVE RESEARCH MODULES" : `INTELLIGENCE / ${record ? esc(record.result.entity?.type?.toUpperCase()) : "START HERE"}`}</span><h1>${inTools ? `Research <em>modules.</em>` : `Public surface <em>research.</em>`}</h1><p>${inTools ? "Built-in collection, local file inspection, and report interchange." : "Research public infrastructure, self-audit accounts, review email-domain DNS, and validate phone format locally."}</p></div><div class="heading-ornament"><div class="ornament-ring ring-one"></div><div class="ornament-ring ring-two"></div><div class="ornament-core">uwu</div></div></section>
+          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(username ? `@${record.result.entity.value}` : record?.query || "")}" placeholder="Domain · IP · ASN · @username · email · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email domain · E.164 phone format</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>`}
           ${state.flash && !inTools ? `<div class="flash-message" role="status">${esc(state.flash)}</div>` : ""}
           ${inTools ? toolsDirectory() : record ? `
             <section class="case-title-row"><div><div class="subject-line"><span class="subject-dot"></span><h2>${esc(record.query)}</h2><span class="type-tag">${esc(record.result.entity?.type || "subject")}</span></div><p>Case opened ${esc(shortDate(record.createdAt))} <span class="middle-dot">·</span> Refreshed ${esc(shortDate(record.updatedAt))}</p></div><button class="delete-button" data-action="delete-case">Delete case <span>×</span></button></section>
-            <nav class="result-tabs" aria-label="Case views">${tabButton("overview", "Overview", "◫")}${username ? tabButton("accounts", "Account footprint", "◎") : ""}${domain ? tabButton("dns", "DNS records", "⌁") : ""}${domain ? tabButton("certificates", "Certificates", "▤") : ""}${domain ? tabButton("subdomains", "Subdomain map", "⌘") : ""}${!username ? tabButton("registration", "Registration", "◈") : ""}${tabButton("imports", "Imported reports", "⇧")}</nav>
+            <nav class="result-tabs" aria-label="Case views">${tabButton("overview", "Overview", "◫")}${username ? tabButton("accounts", "Account footprint", "◎") : ""}${email ? tabButton("email", "Email domain", "✉") : ""}${phone ? tabButton("phone", "Phone format", "+") : ""}${domain || email ? tabButton("dns", "DNS records", "⌁") : ""}${domain ? tabButton("certificates", "Certificates", "▤") : ""}${domain ? tabButton("subdomains", "Subdomain map", "⌘") : ""}${!username && !phone ? tabButton("registration", "Registration", "◈") : ""}${tabButton("imports", "Imported reports", "⇧")}</nav>
             <div class="result-content">${contentFor(record)}</div>
-          ` : `<section class="welcome-grid"><article class="welcome-card"><div class="welcome-icon">⌁</div><span class="eyebrow">01 / COLLECT</span><h2>Start with an asset or account</h2><p>Enter a domain, public IP, ASN, or a username for an account you own. Confirm authorization before starting.</p><div class="welcome-example"><span>TRY A FORMAT</span><code>example.com · @handle</code></div></article><article class="welcome-card"><div class="welcome-icon">◈</div><span class="eyebrow">02 / CONNECT</span><h2>Keep the evidence together</h2><p>Each source reports independently. Findings include collection times, provider links, and a private case notebook.</p><div class="welcome-example"><span>CASE STORAGE</span><code>Only in this browser</code></div></article><article class="welcome-card"><div class="welcome-icon">⇩</div><span class="eyebrow">03 / EXPORT</span><h2>Take your work with you</h2><p>Save a case as JSON for your records or for later processing by another research tool.</p><div class="welcome-example"><span>EXPORT FORMAT</span><code>JSON · source-linked</code></div></article></section>
+          ` : `<section class="welcome-grid"><article class="welcome-card"><div class="welcome-icon">⌁</div><span class="eyebrow">01 / COLLECT</span><h2>Start with a scoped subject</h2><p>Enter a domain or URL, public IP, ASN, username, email, or international phone number for an account or asset you may research.</p><div class="welcome-example"><span>TRY A FORMAT</span><code>example.com · @handle · +14165550123</code></div></article><article class="welcome-card"><div class="welcome-icon">◈</div><span class="eyebrow">02 / CONNECT</span><h2>Keep the evidence together</h2><p>Each source reports independently. Findings include collection times, provider links, and a private case notebook.</p><div class="welcome-example"><span>CASE STORAGE</span><code>Only in this browser</code></div></article><article class="welcome-card"><div class="welcome-icon">⇩</div><span class="eyebrow">03 / EXPORT</span><h2>Take your work with you</h2><p>Save a case as JSON for your records or for later processing by another research tool.</p><div class="welcome-example"><span>EXPORT FORMAT</span><code>JSON · source-linked</code></div></article></section>
             <section class="getting-started"><div><span class="eyebrow">BUILT FOR CAREFUL RESEARCH</span><h3>Scoped source requests</h3><p>Infrastructure checks use public records. Account self-audits request public profile URLs without signing in.</p></div><div class="provider-chips"><span>Cloudflare DNS</span><span>IANA RDAP</span><span>crt.sh</span><span>Host Search</span></div></section>`}
           <footer class="page-footer"><span>UWU OSINT · LOCAL-FIRST RESEARCH</span><span>Public data can be incomplete or out of date. Verify important findings at their source.</span></footer>
         </div>
@@ -530,6 +608,14 @@ function exportEvidenceCsv(record) {
 
   for (const [recordType, answers] of Object.entries(modules.dns?.records || {})) {
     for (const answer of answers || []) add(`DNS ${recordType}`, answer.data, "Cloudflare DNS", modules.dns.queriedAt, answer.ttl == null ? "" : `TTL ${answer.ttl}s`);
+  }
+  const emailAudit = modules.emailAudit || {};
+  for (const [label, status] of [["Email domain MX", emailAudit.mxStatus], ["Email domain SPF", emailAudit.spfStatus], ["Email domain DMARC", emailAudit.dmarcStatus]]) {
+    add(label, status, "Cloudflare DNS", emailAudit.queriedAt, "Public domain policy record status");
+  }
+  const phoneValidation = modules.phoneValidation || {};
+  if (phoneValidation.normalized) {
+    add("Phone format check", phoneValidation.normalized, "Local format check", phoneValidation.queriedAt, `${phoneValidation.format || "E.164"}; ${phoneValidation.digitCount} digits; no network request`);
   }
   const registry = modules.registration || {};
   add("Registry network type", registry.networkType, "IANA RDAP", registry.queriedAt);
@@ -757,13 +843,13 @@ ROOT.addEventListener("submit", (event) => {
   const query = String(form.get("query") || "").trim();
   const category = String(form.get("category") || "all");
   if (!query) {
-    state.flash = "Enter a domain, public IP address, ASN, or @username to start.";
+    state.flash = "Enter a domain or URL, public IP, ASN, @username, email, or international phone number to start.";
     render();
     document.querySelector("#query")?.focus();
     return;
   }
   if (!form.get("scope")) {
-    state.flash = "Confirm you own the account or asset, or have permission to research it.";
+    state.flash = "Confirm you own the account, asset, or contact detail, or have permission to research it.";
     render();
     document.querySelector("[name=scope]")?.focus();
     return;
@@ -848,7 +934,7 @@ ROOT.addEventListener("click", (event) => {
         const url = externalSourceUrl(source, query);
         window.open(url, "_blank", "noopener,noreferrer");
         state.flash = source === "epieos"
-          ? "Opened Epieos. Enter the email on its site to search; this app does not submit or save it."
+          ? "Opened Epieos. Enter the email or phone there manually; this app does not submit or save it."
           : `Opened ${sourceNames[source]} in a new tab. The provider receives the query; results are not saved here.`;
       } catch (error) {
         state.flash = error.message;

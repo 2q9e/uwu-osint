@@ -130,6 +130,8 @@ def normalize_domain(value: str) -> str:
         domain = raw.encode("idna").decode("ascii").lower()
     except UnicodeError as exc:
         raise LookupError("That domain name is not valid.") from exc
+    if len(domain) > 253:
+        raise LookupError("That domain name is too long after internationalized-name conversion.")
     labels = domain.split(".")
     label_pattern = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
     if len(labels) < 2 or any(not label_pattern.fullmatch(label) for label in labels):
@@ -139,21 +141,66 @@ def normalize_domain(value: str) -> str:
     return domain
 
 
+def normalize_email(value: str) -> dict:
+    raw = value.strip()
+    if len(raw) > 254 or raw.count("@") != 1:
+        raise LookupError("Enter a valid email address.")
+    local, domain_value = raw.rsplit("@", 1)
+    local_pattern = re.compile(r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$")
+    if (
+        not local
+        or len(local) > 64
+        or not local_pattern.fullmatch(local)
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+    ):
+        raise LookupError("Enter a valid email address with a standard dot-atom local part.")
+    domain = normalize_domain(domain_value)
+    if len(local) + 1 + len(domain) > 254:
+        raise LookupError("That email address is too long after domain normalization.")
+    return {"type": "email", "value": f"{local}@{domain}", "address": f"{local}@{domain}", "domain": domain}
+
+
+def normalize_phone(value: str) -> dict:
+    raw = value.strip()
+    compact = re.sub(r"[\s().-]", "", raw)
+    if not re.fullmatch(r"\+[1-9]\d{1,14}", compact):
+        raise LookupError("Enter an international phone number in E.164 form, such as +14165550123.")
+    return {"type": "phone", "value": compact, "format": "E.164", "digitCount": len(compact) - 1}
+
+
 def identify(value: str) -> dict:
     raw = value.strip()
     if not raw:
-        raise LookupError("Enter a domain, IP, ASN, or @username.")
+        raise LookupError("Enter a domain or URL, public IP, ASN, @username, email, or international phone number.")
     username_input = raw[1:] if raw.startswith("@") else raw[9:].strip() if raw.lower().startswith("username:") else None
     if username_input is not None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{2,40}", username_input):
             raise LookupError("Enter a username with 2–40 letters, numbers, dots, underscores, or hyphens.")
         return {"type": "username", "value": username_input, "handle": username_input}
+    if raw.lower().startswith("email:"):
+        return normalize_email(raw[6:].strip())
+    phone_input = raw[6:].strip() if raw.lower().startswith("phone:") else raw
+    if raw.lower().startswith("phone:") or phone_input.startswith("+"):
+        return normalize_phone(phone_input)
     asn_match = re.fullmatch(r"(?i)AS(\d{1,10})", raw)
     if asn_match:
         number = int(asn_match.group(1))
         if number > 4_294_967_295:
             raise LookupError("That ASN is out of range.")
         return {"type": "asn", "value": f"AS{number}", "number": number}
+    if raw.lower().startswith(("http://", "https://")):
+        parsed = urlsplit(raw)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise LookupError("Enter a valid HTTP or HTTPS URL without credentials or a nonstandard port.") from exc
+        if not parsed.hostname or parsed.username or parsed.password or port not in (None, 80, 443):
+            raise LookupError("Enter a valid HTTP or HTTPS URL without credentials or a nonstandard port.")
+        raw = parsed.hostname
+    elif "@" in raw:
+        return normalize_email(raw)
     try:
         address = ipaddress.ip_address(raw)
         if not address.is_global:
@@ -257,28 +304,29 @@ def get_registration(entity: dict) -> dict:
 DNS_TYPES = ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "CAA")
 
 
+def query_dns(name: str, record_type: str) -> list[dict]:
+    query_string = urlencode({"name": name, "type": record_type})
+    data = fetch_json(
+        f"https://cloudflare-dns.com/dns-query?{query_string}",
+        expected_host="cloudflare-dns.com",
+        accept="application/dns-json",
+    )
+    if not isinstance(data, dict):
+        raise LookupError("The DNS source returned an unexpected record.")
+    answers = data.get("Answer", [])
+    return [
+        {"data": answer.get("data", ""), "ttl": answer.get("TTL")}
+        for answer in answers
+        if isinstance(answer, dict) and answer.get("data") is not None
+    ]
+
+
 def get_dns(domain: str) -> dict:
     records: dict[str, list[dict]] = {}
     errors: list[str] = []
 
-    def query(record_type: str):
-        query_string = urlencode({"name": domain, "type": record_type})
-        data = fetch_json(
-            f"https://cloudflare-dns.com/dns-query?{query_string}",
-            expected_host="cloudflare-dns.com",
-            accept="application/dns-json",
-        )
-        if not isinstance(data, dict):
-            raise LookupError("The DNS source returned an unexpected record.")
-        answers = data.get("Answer", [])
-        return [
-            {"data": answer.get("data", ""), "ttl": answer.get("TTL")}
-            for answer in answers
-            if isinstance(answer, dict) and answer.get("data") is not None
-        ]
-
     with ThreadPoolExecutor(max_workers=len(DNS_TYPES)) as pool:
-        futures = {pool.submit(query, record_type): record_type for record_type in DNS_TYPES}
+        futures = {pool.submit(query_dns, domain, record_type): record_type for record_type in DNS_TYPES}
         for future in as_completed(futures):
             record_type = futures[future]
             try:
@@ -291,6 +339,50 @@ def get_dns(domain: str) -> dict:
         "queriedAt": now_iso(),
         "records": {record_type: records.get(record_type, []) for record_type in DNS_TYPES},
         "errors": errors,
+    }
+
+
+def get_email_audit(domain: str, dns: dict) -> dict:
+    failed_types = {str(error).partition(":")[0] for error in dns.get("errors", [])}
+    txt_available = "TXT" not in failed_types
+    mx_available = "MX" not in failed_types
+    txt_records = dns.get("records", {}).get("TXT", [])
+    spf_records = [
+        item for item in txt_records
+        if str(item.get("data", "")).strip('"').lower().startswith("v=spf1")
+    ]
+    try:
+        dmarc_records = query_dns(f"_dmarc.{domain}", "TXT")
+        dmarc_error = None
+    except LookupError as exc:
+        dmarc_records = []
+        dmarc_error = str(exc)
+    mx_records = dns.get("records", {}).get("MX", [])
+    return {
+        "source": "https://cloudflare-dns.com/dns-query",
+        "queriedAt": now_iso(),
+        "domain": domain,
+        "mxRecords": mx_records,
+        "mxStatus": "published" if mx_records else "missing" if mx_available else "unknown",
+        "spfRecords": spf_records,
+        "spfStatus": "published" if spf_records else "missing" if txt_available else "unknown",
+        "dmarcRecords": dmarc_records,
+        "dmarcStatus": "published" if dmarc_records else "missing" if not dmarc_error else "unknown",
+        "dmarcError": dmarc_error,
+        "notice": "Checks public mail-domain DNS only. It does not verify a mailbox, identify a person, or test message delivery.",
+    }
+
+
+def get_phone_validation(entity: dict) -> dict:
+    return {
+        "source": "Local E.164 format check",
+        "queriedAt": now_iso(),
+        "normalized": entity["value"],
+        "format": "E.164",
+        "digitCount": entity["digitCount"],
+        "validShape": True,
+        "networkRequested": False,
+        "notice": "This is a syntax check only. No subscriber, carrier, location, or account information was queried.",
     }
 
 
@@ -352,6 +444,24 @@ def list_open_source_tools() -> dict:
             "available": True,
             "mode": "Live checks · user initiated",
             "url": PROFILE_DATA_URL,
+            "integration": "native",
+        },
+        {
+            "id": "email-domain-audit",
+            "name": "Email domain audit",
+            "purpose": "Inspect MX, SPF, and DMARC DNS for the domain part of an authorized email address.",
+            "available": True,
+            "mode": "Domain-only DNS and RDAP · no mailbox lookup",
+            "url": "https://cloudflare-dns.com/dns-query",
+            "integration": "native",
+        },
+        {
+            "id": "phone-format",
+            "name": "Phone format check",
+            "purpose": "Normalize an international number locally to E.164 syntax without subscriber lookups.",
+            "available": True,
+            "mode": "Local format check · no network request",
+            "url": "",
             "integration": "native",
         },
         {
@@ -784,8 +894,20 @@ def inspect_metadata(payload: dict) -> dict:
 def investigate(value: str, authorized: bool = False, category: str = "all", limit: int = 25) -> dict:
     entity = identify(value)
     modules = {}
+    if entity["type"] in {"username", "email", "phone"} and not authorized:
+        raise LookupError("Confirm this is your account or contact detail, or that you have permission to research it.")
     if entity["type"] == "username":
         modules["accounts"] = run_module(get_account_footprint, entity, authorized, category, limit)
+    elif entity["type"] == "email":
+        domain_entity = {"type": "domain", "value": entity["domain"]}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            dns_future = pool.submit(run_module, get_dns, entity["domain"])
+            registration_future = pool.submit(run_module, get_registration, domain_entity)
+            modules["dns"] = dns_future.result()
+            modules["registration"] = registration_future.result()
+        modules["emailAudit"] = run_module(get_email_audit, entity["domain"], modules["dns"])
+    elif entity["type"] == "phone":
+        modules["phoneValidation"] = {"status": "ok", **get_phone_validation(entity)}
     elif entity["type"] == "domain":
         with ThreadPoolExecutor(max_workers=3) as pool:
             jobs = {
@@ -877,7 +999,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise LookupError("The request body must be an object.")
             if path == "/api/investigate":
                 if not isinstance(payload.get("query"), str):
-                    raise LookupError("Enter a domain, public IP address, ASN, or username.")
+                    raise LookupError("Enter a domain or URL, public IP, ASN, @username, email, or international phone number.")
                 category = payload.get("category", "all")
                 limit = payload.get("limit", 25)
                 if not isinstance(category, str) or not isinstance(limit, int) or isinstance(limit, bool):
@@ -898,3 +1020,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/"):
             print(f"{self.log_date_time_string()} {self.command} {urlsplit(self.path).path}")
 
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the local uwu-osint research workspace.")
+    parser.add_argument("--port", type=int, default=8080)
+    args = parser.parse_args()
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    print(f"uwu-osint is available at http://127.0.0.1:{args.port} (loopback only)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping uwu-osint.")
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
