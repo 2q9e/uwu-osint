@@ -31,6 +31,10 @@ const state = {
   externalAuthorized: false,
   externalOtxUrlAcknowledged: false,
   graphSelection: "",
+  graphQuery: "",
+  graphTypeFilter: "all",
+  graphSourceFilter: "all",
+  graphZoom: 100,
   revealSensitive: false,
 };
 
@@ -403,13 +407,13 @@ function relationshipGraphData(record) {
     byKey.set(key, node);
     return node;
   };
-  const addEdge = (from, to, label, source, queriedAt, detail = "") => {
+  const addEdge = (from, to, label, source, queriedAt, detail = "", observedAt = "") => {
     if (!from || !to || from.id === to.id) return;
     const sourceName = String(source || "Source not recorded");
     const key = `${from.id}|${to.id}|${label}|${sourceName}`;
     if (seenEdges.has(key)) return;
     seenEdges.add(key);
-    edges.push({ id: `edge-${edges.length}`, from, to, label, source: sourceName, queriedAt: queriedAt || "", detail });
+    edges.push({ id: `edge-${edges.length}`, from, to, label, source: sourceName, queriedAt: queriedAt || "", observedAt: observedAt || "", detail });
   };
   const inDomainScope = (value) => {
     const hostname = String(value || "").trim().toLowerCase().replace(/^\*\./, "").replace(/\.$/, "");
@@ -431,7 +435,7 @@ function relationshipGraphData(record) {
     for (const cert of (modules.certificates?.names || []).slice(0, 40)) {
       if (!inDomainScope(cert.name)) continue;
       const node = addNode("host", cert.name, { kind: "host", level: 1, detail: `Certificate name${cert.firstSeen ? ` · first seen ${shortDate(cert.firstSeen)}` : ""}` });
-      addEdge(root, node, "name listed in certificate transparency", "crt.sh", modules.certificates?.queriedAt, cert.firstSeen ? `First seen ${shortDate(cert.firstSeen)}` : "");
+      addEdge(root, node, "name listed in certificate transparency", "crt.sh", modules.certificates?.queriedAt, cert.firstSeen ? `First seen ${shortDate(cert.firstSeen)}` : "", cert.firstSeen || "");
     }
     const labels = { A: "A record", AAAA: "AAAA record", CNAME: "CNAME alias", MX: "MX mail host", NS: "NS nameserver" };
     for (const [recordType, rows] of Object.entries(modules.dns?.records || {})) {
@@ -458,6 +462,29 @@ function relationshipGraphData(record) {
       addEdge(root, node, "PTR record names", "Cloudflare DNS", modules.reverseDns?.queriedAt);
     }
   }
+  if (kind === "domain" || kind === "email-domain") {
+    const resolvedAddresses = new Set([
+      ...(modules.subdomains?.hosts || []).flatMap((host) => host.addresses || []),
+      ...Object.entries(modules.dns?.records || {}).filter(([type]) => type === "A" || type === "AAAA").flatMap(([, rows]) => (Array.isArray(rows) ? rows : []).map((row) => row.data)),
+    ].map((address) => String(address).toLowerCase()));
+    for (const report of modules.imports || []) {
+      if (!report || typeof report !== "object") continue;
+      const reportSource = `Imported report: ${report.tool || "Infrastructure report"}`;
+      for (const finding of report.findings || []) {
+        if (!finding || typeof finding !== "object") continue;
+        const value = String(finding.value || "").trim();
+        const reportedSources = Array.isArray(finding.sources) ? finding.sources.filter((source) => typeof source === "string").slice(0, 8) : [];
+        const evidenceSources = reportedSources.length ? reportedSources.map((source) => `${reportSource} · ${source}`) : [reportSource];
+        if (finding.type === "HOST" && inDomainScope(value)) {
+          const node = addNode("host", value, { kind: "host", level: 1, detail: "Hostname finding retained by the case-scope import filter" });
+          for (const evidenceSource of evidenceSources) addEdge(root, node, "in-scope report finding", evidenceSource, report.queriedAt, "Hostname retained by the infrastructure-only import filter");
+        } else if (finding.type === "IP" && resolvedAddresses.has(value.toLowerCase())) {
+          const node = addNode("ip", value, { kind: "ip", level: 2, detail: "IP finding matched an address already resolved in this domain case" });
+          for (const evidenceSource of evidenceSources) addEdge(root, node, "in-scope report finding", evidenceSource, report.queriedAt, "Address matched the case’s existing resolved-address scope");
+        }
+      }
+    }
+  }
   if (modules.registration && (kind === "ip" || kind === "asn")) {
     const ranges = [...new Set((modules.registration.cidrs || []).filter(Boolean))].slice(0, 20);
     if (!ranges.length && modules.registration.startAddress && modules.registration.endAddress) ranges.push(`${modules.registration.startAddress} – ${modules.registration.endAddress}`);
@@ -467,6 +494,55 @@ function relationshipGraphData(record) {
     }
   }
   return { nodes, edges, omitted };
+}
+
+function relationshipTimeline(record, graph) {
+  const events = [];
+  const collections = new Map();
+  const addEvent = (event) => {
+    const timestamp = Date.parse(event.date || "");
+    if (!Number.isFinite(timestamp)) return;
+    events.push({ ...event, timestamp });
+  };
+  for (const edge of graph.edges) {
+    if (edge.queriedAt) {
+      const key = `${edge.source}|${edge.queriedAt}`;
+      const group = collections.get(key) || { source: edge.source, date: edge.queriedAt, observations: [] };
+      group.observations.push(`${edge.label}: ${edge.to.label}`);
+      collections.set(key, group);
+    }
+    if (edge.observedAt) addEvent({
+      date: edge.observedAt,
+      collectedAt: edge.queriedAt,
+      source: edge.source,
+      title: "Certificate name first seen",
+      detail: edge.to.label,
+      kind: "event",
+    });
+  }
+  for (const group of collections.values()) {
+    const preview = group.observations.slice(0, 2).join(" · ");
+    const remainder = group.observations.length - 2;
+    addEvent({
+      date: group.date,
+      collectedAt: group.date,
+      source: group.source,
+      title: "Source snapshot collected",
+      detail: `${preview}${remainder > 0 ? ` · +${remainder} more` : ""}`,
+      count: group.observations.length,
+      kind: "collection",
+    });
+  }
+  const registration = record.result.modules?.registration || {};
+  for (const event of registration.events || []) addEvent({
+    date: event.date,
+    collectedAt: registration.queriedAt,
+    source: "IANA RDAP",
+    title: `Registry event · ${event.action || "event"}`,
+    detail: "Event date reported in the registry response",
+    kind: "event",
+  });
+  return events.sort((a, b) => b.timestamp - a.timestamp).slice(0, 100);
 }
 
 function relationshipGraphContent(record) {
@@ -482,7 +558,8 @@ function relationshipGraphContent(record) {
     const from = positions.get(edge.from.id), to = positions.get(edge.to.id);
     if (!from || !to) return "";
     const sx = from.x + 232, sy = from.y + 23, tx = to.x, ty = to.y + 23, bend = Math.max(32, (tx - sx) * .45);
-    return `<path class="relationship-edge" d="M ${sx} ${sy} C ${sx + bend} ${sy}, ${tx - bend} ${ty}, ${tx} ${ty}" data-edge-from="${edge.from.id}" data-edge-to="${edge.to.id}" aria-hidden="true"><title>${esc(`${edge.label} · ${edge.source} · ${shortDate(edge.queriedAt)}`)}</title></path>`;
+    const edgeFocus = state.graphSelection ? edge.from.id === state.graphSelection || edge.to.id === state.graphSelection ? "is-connected" : "is-dimmed" : "";
+    return `<path class="relationship-edge ${edgeFocus}" d="M ${sx} ${sy} C ${sx + bend} ${sy}, ${tx - bend} ${ty}, ${tx} ${ty}" data-edge-from="${edge.from.id}" data-edge-to="${edge.to.id}" data-edge-source="${esc(edge.source)}" aria-hidden="true"><title>${esc(`${edge.label} · ${edge.source} · ${shortDate(edge.queriedAt)}`)}</title></path>`;
   }).join("");
   const nodes = graph.nodes.map((node) => {
     const point = positions.get(node.id), label = node.label.length > 30 ? `${node.label.slice(0, 27)}…` : node.label;
@@ -490,12 +567,19 @@ function relationshipGraphContent(record) {
   }).join("");
   const selected = graph.nodes.find((node) => node.id === state.graphSelection);
   const selectedEdges = selected ? graph.edges.filter((edge) => edge.from.id === selected.id || edge.to.id === selected.id) : [];
-  const ledger = graph.edges.map((edge) => `<tr data-ledger-from="${edge.from.id}" data-ledger-to="${edge.to.id}"><td><code>${esc(edge.from.label)}</code></td><td>${esc(edge.label)}</td><td><code>${esc(edge.to.label)}</code></td><td>${esc(edge.source)}</td><td>${esc(shortDate(edge.queriedAt))}${edge.detail ? `<small>${esc(edge.detail)}</small>` : ""}</td></tr>`).join("");
+  const selectedSourceCount = new Set(selectedEdges.map((edge) => edge.source)).size;
+  const ledger = graph.edges.map((edge) => `<tr data-ledger-from="${edge.from.id}" data-ledger-to="${edge.to.id}" data-ledger-source="${esc(edge.source)}"><td><code>${esc(edge.from.label)}</code></td><td>${esc(edge.label)}</td><td><code>${esc(edge.to.label)}</code></td><td>${esc(edge.source)}</td><td>${esc(shortDate(edge.queriedAt))}${edge.detail ? `<small>${esc(edge.detail)}</small>` : ""}</td></tr>`).join("");
+  const timeline = relationshipTimeline(record, graph);
+  const sources = [...new Set(graph.edges.map((edge) => edge.source))].sort((a, b) => a.localeCompare(b));
+  const selectedEvidence = selectedEdges.map((edge) => `<li data-evidence-source="${esc(edge.source)}"><span class="graph-evidence-direction">${edge.from.id === selected.id ? "OUT" : "IN"}</span><span><b>${esc(edge.label)}</b><small>${esc(edge.from.id === selected.id ? edge.to.label : edge.from.label)} · ${esc(edge.source)} · collected ${esc(shortDate(edge.queriedAt))}</small></span></li>`).join("");
+  const timelineRows = timeline.map((event) => `<li class="graph-timeline-row" data-timeline-source="${esc(event.source)}"><time datetime="${esc(event.date)}">${esc(shortDate(event.date))}</time><span class="timeline-kind ${event.kind}">${event.kind === "collection" ? "COLLECTED" : "OBSERVED"}</span><div><b>${esc(event.title)}</b><small>${esc(event.source)} · ${esc(event.detail)}${event.collectedAt && event.kind === "event" ? ` · collected ${esc(shortDate(event.collectedAt))}` : ""}</small></div></li>`).join("");
+  const zoomWidth = Math.round(width * state.graphZoom / 100);
   return `<div class="tab-intro"><div><span class="eyebrow">CASE-LOCAL EVIDENCE GRAPH</span><h2>Infrastructure relationships</h2><p>${graph.nodes.length} entities · ${graph.edges.length} sourced observations · collected ${esc(shortDate(record.result.generatedAt || record.updatedAt))}</p></div><button class="secondary-button" data-action="export-graphml">Export GraphML</button></div>
     <div class="notice graph-notice">Connections describe what a named source reported at collection time. They do not prove common ownership, identity, current control, or maliciousness. This graph uses infrastructure data from the selected case and makes no new network requests.</div>
     ${graph.omitted ? `<div class="notice">The graph is capped at 90 unique entities; ${graph.omitted} additional node candidate${graph.omitted === 1 ? " was" : "s were"} omitted. Other case views keep their normal results.</div>` : ""}
-    <section class="panel relationship-graph-panel"><div class="relationship-toolbar"><label class="graph-search-field" for="relationship-search"><span>FIND AN ENTITY</span><input id="relationship-search" type="search" placeholder="Filter graph labels" autocomplete="off" /></label><label class="graph-filter-field" for="relationship-filter"><span>SHOW</span><select id="relationship-filter"><option value="all">All entities</option><option value="host">Hostnames</option><option value="ip">IP addresses</option><option value="record">DNS / registry</option></select></label><span class="graph-scroll-hint">Scroll to explore · select a node for evidence</span></div><div class="network-graph-wrap relationship-canvas"><svg class="relationship-svg" viewBox="0 0 ${width} ${height}" role="group" aria-label="Infrastructure relationship graph for ${esc(record.result.entity?.value)}">${edges}${nodes}</svg></div><div class="relationship-legend"><span><i class="legend-root"></i>Case subject</span><span><i class="legend-host"></i>Hostname</span><span><i class="legend-ip"></i>IP address</span><span><i class="legend-record"></i>DNS / registry record</span></div><p class="graph-filter-empty" id="graph-filter-empty" hidden>No entities match these filters.</p></section>
-    ${selected ? `<section class="panel graph-selection-panel" aria-live="polite"><div><span class="eyebrow">SELECTED ENTITY</span><h3>${esc(selected.label)}</h3><p>${esc(selected.detail || selected.type)} · ${selectedEdges.length} linked observation${selectedEdges.length === 1 ? "" : "s"}</p></div><button class="text-button" data-action="clear-graph-selection">Clear selection</button></section>` : ""}
+    <section class="panel relationship-graph-panel"><div class="relationship-toolbar"><label class="graph-search-field" for="relationship-search"><span>FIND AN ENTITY</span><input id="relationship-search" type="search" value="${esc(state.graphQuery)}" placeholder="Filter graph labels" autocomplete="off" /></label><label class="graph-filter-field" for="relationship-filter"><span>SHOW</span><select id="relationship-filter"><option value="all" ${state.graphTypeFilter === "all" ? "selected" : ""}>All entities</option><option value="host" ${state.graphTypeFilter === "host" ? "selected" : ""}>Hostnames</option><option value="ip" ${state.graphTypeFilter === "ip" ? "selected" : ""}>IP addresses</option><option value="record" ${state.graphTypeFilter === "record" ? "selected" : ""}>DNS / registry</option></select></label><label class="graph-filter-field" for="relationship-source"><span>PROVENANCE</span><select id="relationship-source"><option value="all" ${state.graphSourceFilter === "all" ? "selected" : ""}>All sources</option>${sources.map((source) => `<option value="${esc(source)}" ${state.graphSourceFilter === source ? "selected" : ""}>${esc(source)}</option>`).join("")}</select></label><label class="graph-zoom-field" for="relationship-zoom"><span>ZOOM <output id="graph-zoom-value">${state.graphZoom}%</output></span><input id="relationship-zoom" type="range" min="70" max="160" step="5" value="${state.graphZoom}" aria-label="Graph zoom" /></label><button class="text-button graph-zoom-reset" data-action="reset-graph-zoom">Reset zoom</button><span class="graph-scroll-hint">Scroll the canvas · select a node for evidence</span></div><div class="network-graph-wrap relationship-canvas"><svg class="relationship-svg" style="width:${zoomWidth}px;min-width:${zoomWidth}px" data-graph-width="${width}" viewBox="0 0 ${width} ${height}" role="group" aria-label="Infrastructure relationship graph for ${esc(record.result.entity?.value)}">${edges}${nodes}</svg></div><div class="relationship-legend"><span><i class="legend-root"></i>Case subject</span><span><i class="legend-host"></i>Hostname</span><span><i class="legend-ip"></i>IP address</span><span><i class="legend-record"></i>DNS / registry record</span></div><p class="graph-filter-empty" id="graph-filter-empty" hidden>No connections match these filters.</p></section>
+    ${selected ? `<section class="panel graph-selection-panel" aria-live="polite"><div class="graph-selection-heading"><span><span class="eyebrow">SELECTED ENTITY</span><h3>${esc(selected.label)}</h3><p>${esc(selected.detail || selected.type)} · ${selectedEdges.length} linked observation${selectedEdges.length === 1 ? "" : "s"} · ${selectedSourceCount} named source label${selectedSourceCount === 1 ? "" : "s"}</p></span><button class="text-button" data-action="clear-graph-selection">Clear selection</button></div>${selectedEvidence ? `<ul class="graph-evidence-list">${selectedEvidence}</ul>` : ""}</section>` : ""}
+    <section class="panel graph-ledger-panel"><div class="panel-heading"><div><span class="eyebrow">TIME & PROVENANCE</span><h3>Evidence timeline</h3></div><span class="panel-caption">Reported dates and collection times are kept distinct</span></div>${timelineRows ? `<ol class="graph-timeline">${timelineRows}</ol>` : `<p class="empty-record">No dated observations were returned.</p>`}</section>
     <section class="panel graph-ledger-panel"><div class="panel-heading"><div><span class="eyebrow">SOURCE PROVENANCE</span><h3>Evidence ledger</h3></div><span class="panel-caption">${graph.edges.length} graph connection${graph.edges.length === 1 ? "" : "s"}</span></div><div class="panel table-panel"><table><thead><tr><th>From</th><th>Observation</th><th>To</th><th>Source</th><th>Collected</th></tr></thead><tbody>${ledger}</tbody></table></div></section>`;
 }
 
@@ -526,9 +610,9 @@ function accountsContent(record) {
 
 function importedContent(record) {
   const modules = record.result.modules?.imports ?? [];
-  return `<div class="tab-intro"><div><span class="eyebrow">REPORT INTERCHANGE</span><h2>Imported tool results</h2><p>Common JSON, JSONL, or CSV reports · personal and contact fields are discarded during import.</p></div></div>
-    <section class="panel import-panel"><div class="panel-heading"><div><span class="eyebrow">ADD EXISTING EVIDENCE</span><h3>Import an infrastructure report</h3></div><span class="panel-caption">Stored only with this browser case</span></div><div class="import-controls"><label class="sr-only" for="import-tool">Report type</label><select id="import-tool"><option value="Generic OSINT report">Generic OSINT report</option><option value="Domain report">Domain report</option><option value="Network inventory">Network inventory</option><option value="Certificate report">Certificate report</option></select><label class="file-picker">Choose report<input id="report-file" type="file" accept=".json,.jsonl,.csv,application/json,text/csv" /></label><button class="secondary-button" data-action="import-report">Import to case</button></div><p class="import-footnote">In-scope hostnames and IP addresses are kept. Email addresses, names, phone numbers, and unrelated values are dropped. Maximum file size: 4 MB.</p></section>
-    ${modules.length ? `<div class="import-list">${modules.map((item) => `<section class="panel imported-report"><div class="imported-report-heading"><div><span class="tag">${esc(item.tool)}</span><b>${item.findings.length} finding${item.findings.length === 1 ? "" : "s"}</b></div><span>${esc(shortDate(item.queriedAt))}</span></div><p class="import-provenance">${item.filename ? `File: ${esc(item.filename)} · ` : ""}${esc(item.inputRecords ?? "?")} input record${item.inputRecords === 1 ? "" : "s"} · ${esc(item.invalidLines ?? 0)} invalid line${item.invalidLines === 1 ? "" : "s"} · ${esc(item.duplicateFindings ?? 0)} duplicate finding${item.duplicateFindings === 1 ? "" : "s"}${item.truncatedRecords ? ` · ${esc(item.truncatedRecords)} input record${item.truncatedRecords === 1 ? "" : "s"} skipped by the 10,000-row limit` : ""}${item.omittedCandidates ? ` · ${esc(item.omittedCandidates)} matching candidate${item.omittedCandidates === 1 ? "" : "s"} omitted by the 2,000-finding limit` : ""}</p>${item.findings.length ? `<ul>${item.findings.slice(0, 500).map((finding) => `<li><span class="tag">${esc(finding.type)}</span><code>${esc(finding.value)}</code></li>`).join("")}</ul>` : `<p class="subtle-note">No in-scope hostname or IP findings were found in that report.</p>`}</section>`).join("")}</div>` : `<div class="empty-panel compact-empty"><h3>No imported reports yet</h3><p>Import JSON, JSONL, or CSV infrastructure output to add scoped findings to this case.</p></div>`}`;
+  return `<div class="tab-intro"><div><span class="eyebrow">REPORT INTERCHANGE</span><h2>Imported tool results</h2><p>JSON, JSONL/NDJSON, CSV, or plain hostname lists · out-of-scope and personal fields are discarded.</p></div></div>
+    <section class="panel import-panel"><div class="panel-heading"><div><span class="eyebrow">NORMALIZE EXTERNAL EVIDENCE</span><h3>Bring tool results into this case</h3></div><span class="panel-caption">Local file · no tool is launched</span></div><p class="tool-copy">Load a Subfinder host list or structured output from Subfinder, theHarvester, Amass, SpiderFoot, or a compatible exporter. uwu-osint keeps only findings inside this case’s existing scope, merges duplicates, and preserves source labels and collection time.</p><div class="import-controls"><label class="sr-only" for="import-tool">Report type</label><select id="import-tool"><option value="Generic OSINT report">Generic OSINT report</option><option value="Subfinder export">Subfinder export</option><option value="theHarvester export">theHarvester export</option><option value="Amass export">Amass export</option><option value="SpiderFoot export">SpiderFoot export</option><option value="Domain report">Domain report</option><option value="Network inventory">Network inventory</option><option value="Certificate report">Certificate report</option></select><label class="file-picker">Choose report<input id="report-file" type="file" accept=".json,.jsonl,.csv,.txt,application/json,text/csv,text/plain" /></label><button class="secondary-button" data-action="import-report">Import to case</button></div><p class="import-footnote">Supports JSON, JSONL/NDJSON, CSV, and plain hostname lists. Email addresses, people, phones, usernames, credentials, and out-of-scope data are dropped. Maximum file size: 4 MB.</p></section>
+    ${modules.length ? `<div class="import-list">${modules.map((item) => `<section class="panel imported-report"><div class="imported-report-heading"><div><span class="tag">${esc(item.tool)}</span><b>${item.findings.length} finding${item.findings.length === 1 ? "" : "s"}</b></div><span>${esc(shortDate(item.queriedAt))}</span></div><p class="import-provenance">${item.filename ? `File: ${esc(item.filename)} · ` : ""}${esc(item.inputRecords ?? "?")} input record${item.inputRecords === 1 ? "" : "s"} · ${esc(item.invalidLines ?? 0)} invalid line${item.invalidLines === 1 ? "" : "s"} · ${esc(item.duplicateFindings ?? 0)} duplicate finding${item.duplicateFindings === 1 ? "" : "s"}${item.truncatedRecords ? ` · ${esc(item.truncatedRecords)} input record${item.truncatedRecords === 1 ? "" : "s"} skipped by the 10,000-row limit` : ""}${item.omittedCandidates ? ` · ${esc(item.omittedCandidates)} matching candidate${item.omittedCandidates === 1 ? "" : "s"} omitted by the 2,000-finding limit` : ""}</p>${item.findings.length ? `<ul>${item.findings.slice(0, 500).map((finding) => `<li><span class="tag">${esc(finding.type)}</span><code>${esc(finding.value)}</code>${(finding.sources || []).slice(0, 3).map((source) => `<span class="tag">${esc(source)}</span>`).join("")}</li>`).join("")}</ul>` : `<p class="subtle-note">No in-scope hostname or IP findings were found in that report.</p>`}</section>`).join("")}</div>` : `<div class="empty-panel compact-empty"><h3>No imported reports yet</h3><p>Import JSON, JSONL/NDJSON, CSV, or a plain hostname list to add scoped findings to this case.</p></div>`}`;
 }
 
 function emailAuditContent(record) {
@@ -590,22 +674,30 @@ function toolsDirectory() {
 
 function sourceDirectoryPanel() {
   const sources = [
-    { name: "OSINT Framework", category: "Directory", tier: "public", access: "Free directory · entry access varies", detail: "A searchable directory that groups public research resources by subject and workflow. It points to third-party tools; it does not collect results itself.", url: "https://osintframework.com/", icon: "⌘" },
-    { name: "OSINT Industries", category: "Identity", tier: "commercial", access: "Account / API access · plan terms vary", detail: "Advertises email, phone, username, name, and wallet searches, with account, timeline, map, export, and API views. Results are vendor output and need independent review.", url: "https://www.osint.industries/", icon: "◎" },
-    { name: "Maltego", category: "Link analysis", tier: "mixed", access: "Free and paid plans · access varies", detail: "Visual link-analysis software with transforms, connectors, and optional commercial data services for building and reviewing evidence graphs.", url: "https://www.maltego.com/pricing/", icon: "⌘" },
-    { name: "Censys", category: "Infrastructure", tier: "mixed", access: "Free credits · paid plans / credits", detail: "Searches internet-facing hosts, services, domains, and certificates, with structured asset views and API options.", url: "https://www.censys.com/resources/pricing", icon: "⌁" },
-    { name: "Shodan", category: "Infrastructure", tier: "account", access: "Account · some actions use credits", detail: "Searches observations about internet-connected devices, including service banners and exposed network services. Use it only for authorized asset review.", url: "https://www.shodan.io/", icon: "⌖" },
-    { name: "VirusTotal", category: "Threat intelligence", tier: "mixed", access: "Public lookup · API tiers vary", detail: "Provides URL, domain, IP, and file-hash reports with security-vendor detections and infrastructure relationships. Check its data-sharing terms before submitting files or URLs.", url: "https://docs.virustotal.com/reference/overview", icon: "◈" },
-    { name: "AlienVault OTX", category: "Threat intelligence", tier: "public", access: "Community service · account/API terms", detail: "Threat-indicator and community pulse research for domains, IP addresses, and URLs. The existing shortcut opens a provider search; it does not import results.", url: "https://otx.alienvault.com/", icon: "◈" },
-    { name: "OpenCorporates", category: "Business records", tier: "commercial", access: "Open-data terms or commercial API", detail: "Company and legal-entity records with source provenance, plus API and bulk-data access under separate terms.", url: "https://opencorporates.com/plug-in-our-data/", icon: "▦" },
-    { name: "Epieos", category: "Identity", tier: "account", access: "External service · access terms vary", detail: "A provider for email or phone related account research. uwu-osint opens it for manual entry and does not submit the subject.", url: "https://epieos.com/", icon: "◎" },
-    { name: "Academic Torrents", category: "Research data", tier: "public", access: "Public dataset catalog", detail: "A catalog for sharing research datasets. It is a dataset source, not an identity lookup or a built-in collector.", url: "https://academictorrents.com/", icon: "▤" },
+    { name: "OSINT Framework", category: "Directory", tier: "public", access: "Free directory · entry access varies", inputs: "Research topic or entity type", outputs: "Curated external tools and links", detail: "A searchable directory that groups public research resources by subject and workflow. It points to third-party tools; it does not collect results itself.", url: "https://osintframework.com/", icon: "⌘" },
+    { name: "Subfinder", category: "Domain discovery", tier: "public", access: "Open-source CLI · some sources need API keys", inputs: "Authorized root domain", outputs: "Passive hostnames and optional source labels", detail: "A focused passive subdomain enumerator designed for speed. Its JSON output can retain the source list; active resolution and IP output are separate options.", url: "https://github.com/projectdiscovery/subfinder", icon: "⌁" },
+    { name: "theHarvester", category: "Reconnaissance", tier: "public", access: "Open-source · source access varies", inputs: "Authorized domain or organization", outputs: "Hostnames, IPs, URLs, and other source findings", detail: "Collects findings across many source categories and records source outcomes. This app’s importer intentionally keeps only in-scope infrastructure fields.", url: "https://github.com/laramies/theHarvester", icon: "⌁" },
+    { name: "Amass", category: "Domain discovery", tier: "public", access: "Open-source · data source access varies", inputs: "Root domain and selected collection mode", outputs: "Discovered names, source data, graph associations", detail: "Supports broad domain enumeration, source selection, passive mode, and a graph-oriented local data store. Active modes require explicit scope review.", url: "https://github.com/owasp-amass/amass/wiki/User-Guide", icon: "⤳" },
+    { name: "SpiderFoot", category: "Automated OSINT", tier: "public", access: "Open-source · optional modules need provider access", inputs: "Authorized seed entity and selected modules", outputs: "Correlated module events and graph exports", detail: "Automates collection and correlation across configurable modules, with JSON, CSV, and graph export options. External module traffic and credentials remain controlled by SpiderFoot.", url: "https://github.com/smicallef/spiderfoot", icon: "⤳" },
+    { name: "OSINT Industries", category: "Identity", tier: "commercial", access: "Account / API access · plan terms vary", inputs: "Email, phone, username, name, wallet", outputs: "Provider results, timelines, maps, exports", detail: "Advertises multi-identifier searches, account and timeline views, exports, and API access. Treat results as vendor output that needs independent review.", url: "https://www.osint.industries/", icon: "◎" },
+    { name: "Maltego", category: "Link analysis", tier: "mixed", access: "Free and paid plans · access varies", inputs: "Entities and configured transforms", outputs: "Linked entity graphs and source data", detail: "Visual link-analysis software with transforms, connectors, and optional commercial data services for building and reviewing evidence graphs.", url: "https://www.maltego.com/pricing/", icon: "⌘" },
+    { name: "Censys", category: "Infrastructure", tier: "mixed", access: "Free credits · paid plans / credits", inputs: "Domains, IPs, networks, certificates", outputs: "Internet host, service, and certificate records", detail: "Searches internet-facing hosts, services, domains, and certificates, with structured asset views and API options.", url: "https://www.censys.com/resources/pricing", icon: "⌁" },
+    { name: "Shodan", category: "Infrastructure", tier: "account", access: "Account · some actions use credits", inputs: "Authorized IPs, domains, or search terms", outputs: "Observed ports, services, and banners", detail: "Searches observations about internet-connected devices, including service banners and exposed network services. Use it only for authorized asset review.", url: "https://www.shodan.io/", icon: "⌖" },
+    { name: "VirusTotal", category: "Threat intelligence", tier: "mixed", access: "Public lookup · API tiers vary", inputs: "URLs, domains, IPs, file hashes", outputs: "Reports, detections, and infrastructure links", detail: "Provides threat-intelligence reports with security-vendor detections and infrastructure relationships. Check its data-sharing terms before submitting files or URLs.", url: "https://docs.virustotal.com/reference/overview", icon: "◈" },
+    { name: "AlienVault OTX", category: "Threat intelligence", tier: "public", access: "Community service · account/API terms", inputs: "Domains, IPs, URLs, file hashes", outputs: "Indicators, community pulses, references", detail: "Threat-indicator and community pulse research. The existing shortcut opens a provider search; it does not import results.", url: "https://otx.alienvault.com/", icon: "◈" },
+    { name: "GreyNoise", category: "Threat intelligence", tier: "mixed", access: "Limited community lookups · account/plan limits", inputs: "Public IPv4 address", outputs: "Scanner observations, classification, owner context", detail: "Community IP lookups report whether GreyNoise observed scanning activity and return basic classification and organization context. Higher limits and additional data depend on current account terms.", url: "https://docs.greynoise.io/docs/using-the-greynoise-community-api", icon: "◈" },
+    { name: "SecurityTrails", category: "Infrastructure", tier: "commercial", access: "API key required · plan terms vary", inputs: "Hostname and DNS record type", outputs: "Historical A, AAAA, MX, NS, SOA, TXT records", detail: "Its API documents historical DNS records by hostname and type. This directory entry does not connect an API key or submit case data.", url: "https://docs.securitytrails.com/reference/dns-history-by-record-type-old-1", icon: "◷" },
+    { name: "OpenCorporates", category: "Business records", tier: "commercial", access: "Open-data terms or commercial API", inputs: "Company name or registry identifiers", outputs: "Company and legal-entity records", detail: "Company and legal-entity records with source provenance, plus API and bulk-data access under separate terms.", url: "https://opencorporates.com/plug-in-our-data/", icon: "▦" },
+    { name: "Epieos", category: "Identity", tier: "account", access: "External service · access terms vary", inputs: "Email or phone, entered on provider site", outputs: "Provider account-related search results", detail: "A provider for email or phone related account research. uwu-osint opens it for manual entry and does not submit the subject.", url: "https://epieos.com/", icon: "◎" },
+    { name: "ShadowDragon Horizon", category: "Investigation platform", tier: "commercial", access: "Enterprise platform · contact for access", inputs: "Public-source queries and supplied data", outputs: "Identity triage, link graphs, monitoring", detail: "An enterprise investigation platform advertising identity research, link analysis, API-driven collection, and ongoing monitoring across public sources.", url: "https://shadowdragon.io/platform/", icon: "⤳" },
+    { name: "Social Links Crimewall", category: "Investigation platform", tier: "commercial", access: "Demo / commercial access · terms vary", inputs: "Public identifiers and connected data sources", outputs: "Structured results, graphs, maps, reports", detail: "An investigation platform advertising connected open-data sources, automated link analysis, and investigation views. Verify source coverage and current terms with the provider.", url: "https://sociallinks.io/products/sl-crimewall", icon: "⤳" },
+    { name: "Academic Torrents", category: "Research data", tier: "public", access: "Public dataset catalog", inputs: "Research topic or dataset title", outputs: "Dataset metadata and shared data", detail: "A catalog for sharing research datasets. It is a dataset source, not an identity lookup or a built-in collector.", url: "https://academictorrents.com/", icon: "▤" },
   ];
   const categories = [...new Set(sources.map((source) => source.category))];
   return `<section class="panel source-directory-panel"><div class="panel-heading"><div><span class="eyebrow">PUBLIC PRODUCT MAP</span><h3>Research source guide</h3></div><span class="panel-caption" id="source-directory-count" aria-live="polite">${sources.length} tools and catalogs</span></div>
-    <p class="tool-copy">A quick map of provider-advertised capabilities across public directories, specialist platforms, and gated data services. These links are independent products, not built-in integrations or endorsements; access, pricing, privacy, and licensing can change, so check each provider’s current terms.</p>
+    <p class="tool-copy">A quick map of open-source projects, public directories, specialist platforms, and gated data services. Input/output descriptions summarize published features; links open independent products, not built-in integrations or endorsements. Check each provider’s current access, privacy, licensing, and terms.</p>
     <div class="source-directory-controls"><label class="external-query-field" for="source-directory-search"><span>SEARCH SOURCES</span><input id="source-directory-search" type="search" placeholder="Name, data type, or capability" autocomplete="off" /></label><label class="graph-filter-field" for="source-directory-category"><span>CATEGORY</span><select id="source-directory-category"><option value="all">All categories</option>${categories.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join("")}</select></label><label class="graph-filter-field" for="source-directory-access"><span>ACCESS MODEL</span><select id="source-directory-access"><option value="all">All access types</option><option value="public">Public / open</option><option value="account">Account / credits</option><option value="commercial">Paid / commercial</option><option value="mixed">Free and paid</option></select></label></div>
-    <div class="source-directory-grid">${sources.map((source) => `<article class="source-directory-card" data-source-card data-source-category="${esc(source.category)}" data-source-tier="${source.tier}"><div class="source-directory-card-top"><span class="integration-icon">${source.icon}</span><span class="tag">${esc(source.category)}</span></div><h4>${esc(source.name)}</h4><p>${esc(source.detail)}</p><div class="source-access">${esc(source.access)}</div>${safeLink(source.url, "Provider details")}</article>`).join("")}</div><p class="source-directory-empty" id="source-directory-empty" hidden>No sources match those filters.</p>
+    <div class="source-directory-grid">${sources.map((source) => `<article class="source-directory-card" data-source-card data-source-category="${esc(source.category)}" data-source-tier="${source.tier}"><div class="source-directory-card-top"><span class="integration-icon">${source.icon}</span><span class="tag">${esc(source.category)}</span></div><h4>${esc(source.name)}</h4><p>${esc(source.detail)}</p><div class="source-capabilities"><span><b>IN</b> ${esc(source.inputs)}</span><span><b>OUT</b> ${esc(source.outputs)}</span></div><div class="source-access">${esc(source.access)}</div>${safeLink(source.url, "Provider details")}</article>`).join("")}</div><p class="source-directory-empty" id="source-directory-empty" hidden>No sources match those filters.</p>
   </section>`;
 }
 
@@ -973,8 +1065,8 @@ function exportRelationshipGraph(record) {
   if (!graph.edges.length) return;
   const xml = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]);
   const nodeData = graph.nodes.map((node) => `<node id="${xml(node.id)}"><data key="label">${xml(node.label)}</data><data key="type">${xml(node.type)}</data><data key="detail">${xml(node.detail)}</data></node>`).join("");
-  const edgeData = graph.edges.map((edge) => `<edge id="${xml(edge.id)}" source="${xml(edge.from.id)}" target="${xml(edge.to.id)}"><data key="observation">${xml(edge.label)}</data><data key="source">${xml(edge.source)}</data><data key="collected">${xml(edge.queriedAt)}</data><data key="detail">${xml(edge.detail)}</data></edge>`).join("");
-  const content = `<?xml version="1.0" encoding="UTF-8"?><graphml xmlns="http://graphml.graphdrawing.org/xmlns"><key id="label" for="node" attr.name="label" attr.type="string"/><key id="type" for="node" attr.name="type" attr.type="string"/><key id="detail" for="all" attr.name="detail" attr.type="string"/><key id="observation" for="edge" attr.name="observation" attr.type="string"/><key id="source" for="edge" attr.name="source" attr.type="string"/><key id="collected" for="edge" attr.name="collected" attr.type="string"/><graph id="uwu-osint-case" edgedefault="directed">${nodeData}${edgeData}</graph></graphml>`;
+  const edgeData = graph.edges.map((edge) => `<edge id="${xml(edge.id)}" source="${xml(edge.from.id)}" target="${xml(edge.to.id)}"><data key="observation">${xml(edge.label)}</data><data key="source">${xml(edge.source)}</data><data key="collected">${xml(edge.queriedAt)}</data><data key="observed">${xml(edge.observedAt)}</data><data key="detail">${xml(edge.detail)}</data></edge>`).join("");
+  const content = `<?xml version="1.0" encoding="UTF-8"?><graphml xmlns="http://graphml.graphdrawing.org/xmlns"><key id="label" for="node" attr.name="label" attr.type="string"/><key id="type" for="node" attr.name="type" attr.type="string"/><key id="detail" for="all" attr.name="detail" attr.type="string"/><key id="observation" for="edge" attr.name="observation" attr.type="string"/><key id="source" for="edge" attr.name="source" attr.type="string"/><key id="collected" for="edge" attr.name="collected" attr.type="string"/><key id="observed" for="edge" attr.name="observed" attr.type="string"/><graph id="uwu-osint-case" edgedefault="directed">${nodeData}${edgeData}</graph></graphml>`;
   const url = URL.createObjectURL(new Blob([content], { type: "application/graphml+xml" }));
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -1007,22 +1099,37 @@ function filterSourceDirectory() {
 function filterRelationshipGraph() {
   const query = document.querySelector("#relationship-search")?.value.trim().toLowerCase() || "";
   const kind = document.querySelector("#relationship-filter")?.value || "all";
-  const visibility = new Map();
-  for (const node of document.querySelectorAll("[data-graph-node]")) {
+  const source = document.querySelector("#relationship-source")?.value || "all";
+  const nodes = [...document.querySelectorAll("[data-graph-node]")];
+  const baseVisibility = new Map();
+  for (const node of nodes) {
     const nodeKind = node.dataset.nodeKind;
     const matchesKind = kind === "all" || nodeKind === kind || (kind === "record" && nodeKind === "root");
     const matchesText = !query || node.dataset.nodeLabel?.includes(query);
-    const visible = matchesKind && matchesText;
-    node.style.display = visible ? "" : "none";
-    visibility.set(node.dataset.graphNode, visible);
+    baseVisibility.set(node.dataset.graphNode, matchesKind && matchesText);
   }
-  for (const edge of document.querySelectorAll("[data-edge-from]")) {
-    edge.style.display = visibility.get(edge.dataset.edgeFrom) && visibility.get(edge.dataset.edgeTo) ? "" : "none";
+  const edges = [...document.querySelectorAll("[data-edge-from]")];
+  const visibleIds = new Set();
+  const visibleEdges = new Set();
+  for (const edge of edges) {
+    if (source !== "all" && edge.dataset.edgeSource !== source) continue;
+    const matchesBoth = baseVisibility.get(edge.dataset.edgeFrom) && baseVisibility.get(edge.dataset.edgeTo);
+    const matchesEither = baseVisibility.get(edge.dataset.edgeFrom) || baseVisibility.get(edge.dataset.edgeTo);
+    if (!(query || kind !== "all" ? matchesEither : matchesBoth)) continue;
+    visibleIds.add(edge.dataset.edgeFrom);
+    visibleIds.add(edge.dataset.edgeTo);
+    visibleEdges.add(edge);
   }
+  for (const node of nodes) node.style.display = visibleIds.has(node.dataset.graphNode) ? "" : "none";
+  for (const edge of edges) edge.style.display = visibleEdges.has(edge) ? "" : "none";
   const rows = [...document.querySelectorAll("[data-ledger-from]")];
-  for (const row of rows) row.hidden = !(visibility.get(row.dataset.ledgerFrom) && visibility.get(row.dataset.ledgerTo));
+  for (const row of rows) row.hidden = !(visibleIds.has(row.dataset.ledgerFrom) && visibleIds.has(row.dataset.ledgerTo)
+    && (source === "all" || row.dataset.ledgerSource === source));
+  for (const row of document.querySelectorAll("[data-timeline-source], [data-evidence-source]")) {
+    row.hidden = source !== "all" && row.dataset.timelineSource !== source && row.dataset.evidenceSource !== source;
+  }
   const empty = document.querySelector("#graph-filter-empty");
-  if (empty) empty.hidden = [...visibility.values()].some(Boolean);
+  if (empty) empty.hidden = visibleEdges.size > 0;
 }
 
 function csvCell(value) {
@@ -1070,7 +1177,11 @@ function exportEvidenceCsv(record) {
     add(`Profile ${site.status}`, site.url || site.site, "Public profile check", modules.accounts.queriedAt, details);
   }
   for (const report of modules.imports || []) {
-    for (const finding of report.findings || []) add(`Imported ${finding.type}`, finding.value, report.tool || "Imported report", report.queriedAt, "In-scope infrastructure finding");
+    for (const finding of report.findings || []) {
+      const reportedSources = Array.isArray(finding.sources) ? finding.sources.join("; ") : "";
+      const provenance = [report.tool || "Imported report", reportedSources].filter(Boolean).join(" · ");
+      add(`Imported ${finding.type}`, finding.value, provenance, report.queriedAt, "In-scope infrastructure finding");
+    }
   }
 
   const content = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
@@ -1153,28 +1264,45 @@ function normalizedFinding(value, typeHint, scope) {
   return { type: "HOST", value: candidate };
 }
 
-function collectInfrastructure(value, scope, output, hint = "", stats = { omittedCandidates: 0 }) {
+function sourceLabelsFrom(value) {
+  const labels = [];
+  for (const key of ["source", "sources", "provider", "providers", "module"]) {
+    const item = value?.[key];
+    const candidates = typeof item === "string" ? [item] : Array.isArray(item) ? item : [];
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string") continue;
+      const label = candidate.trim();
+      if (label && label.length <= 120) labels.push(label);
+    }
+  }
+  return [...new Set(labels)].slice(0, 8);
+}
+
+function collectInfrastructure(value, scope, output, hint = "", stats = { omittedCandidates: 0 }, inheritedSources = []) {
   if (value == null) return;
   if (Array.isArray(value)) {
-    for (const item of value) collectInfrastructure(item, scope, output, hint, stats);
+    for (const item of value) collectInfrastructure(item, scope, output, hint, stats, inheritedSources);
     return;
   }
   if (!value || typeof value !== "object") return;
   const typeHint = String(value.type || value.eventType || value.event_type || value.kind || hint).toLowerCase();
   if (/email|person|phone|username|social|contact|credential|breach|password/.test(typeHint)) return;
+  const sourceLabels = [...new Set([...inheritedSources, ...sourceLabelsFrom(value)])].slice(0, 8);
   const ipKeys = new Set(["ip", "ip_address", "ipaddress", "ipv4", "ipv6", "address_ip"]);
   const hostKeys = new Set(["host", "hostname", "domain", "subdomain", "fqdn", "internet_name", "name_value"]);
   for (const [key, child] of Object.entries(value)) {
     const normalizedKey = key.toLowerCase().replace(/[ -]/g, "_");
     const candidateHint = `${typeHint} ${normalizedKey}`;
-    if (typeof child === "string" && (ipKeys.has(normalizedKey) || hostKeys.has(normalizedKey) || (normalizedKey === "data" && /host|domain|internet_name|ip_address/.test(typeHint)))) {
+    const typedName = normalizedKey === "name" && /fqdn|host|domain|dns|internet_name/.test(typeHint);
+    const typedValue = normalizedKey === "value" && /(^|[^a-z])(host|hostname|domain|subdomain|fqdn|internet_name|ip|ipv4|ipv6|ip_address)([^a-z]|$)/.test(typeHint);
+    if (typeof child === "string" && (ipKeys.has(normalizedKey) || hostKeys.has(normalizedKey) || typedName || typedValue || (normalizedKey === "data" && /host|domain|internet_name|ip_address/.test(typeHint)))) {
       const finding = normalizedFinding(child, candidateHint, scope);
       if (finding) {
-        if (output.length < 2000) output.push(finding);
+        if (output.length < 2000) output.push(sourceLabels.length ? { ...finding, sources: sourceLabels } : finding);
         else stats.omittedCandidates += 1;
       }
     }
-    if (typeof child === "object") collectInfrastructure(child, scope, output, typeHint, stats);
+    if (typeof child === "object") collectInfrastructure(child, scope, output, typeHint, stats, sourceLabels);
   }
 }
 
@@ -1187,7 +1315,7 @@ async function importReport() {
     return;
   }
   if (!file) {
-    state.flash = "Choose a JSON, JSONL, or CSV report to import.";
+    state.flash = "Choose a JSON, JSONL, CSV export, or plain hostname list to import.";
     render();
     return;
   }
@@ -1208,7 +1336,18 @@ async function importReport() {
     const scope = { ...(record.result.entity || {}), allowedIps };
     const findings = [];
     const importStats = { omittedCandidates: 0, invalidLines: 0, inputRecords: 0, truncatedRecords: 0 };
-    if (file.name.toLowerCase().endsWith(".csv")) {
+    if (file.name.toLowerCase().endsWith(".txt")) {
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
+      importStats.truncatedRecords = Math.max(0, lines.length - 10000);
+      importStats.inputRecords = Math.min(lines.length, 10000);
+      for (const line of lines.slice(0, 10000)) {
+        const finding = normalizedFinding(line, "hostname", scope);
+        if (finding) {
+          if (findings.length < 2000) findings.push(finding);
+          else importStats.omittedCandidates += 1;
+        } else importStats.invalidLines += 1;
+      }
+    } else if (file.name.toLowerCase().endsWith(".csv")) {
       const rows = parseCsv(text, importStats);
       collectInfrastructure(rows, scope, findings, "", importStats);
     } else if (file.name.toLowerCase().endsWith(".jsonl")) {
@@ -1225,7 +1364,14 @@ async function importReport() {
       importStats.inputRecords = Array.isArray(parsed) ? parsed.length : parsed && typeof parsed === "object" ? 1 : 0;
       collectInfrastructure(parsed, scope, findings, "", importStats);
     }
-    const unique = Array.from(new Map(findings.map((item) => [`${item.type}:${item.value}`, item])).values());
+    const uniqueByFinding = new Map();
+    for (const item of findings) {
+      const key = `${item.type}:${item.value}`;
+      const existing = uniqueByFinding.get(key);
+      const sources = [...new Set([...(existing?.sources || []), ...(item.sources || [])])].slice(0, 8);
+      uniqueByFinding.set(key, { ...existing, ...item, ...(sources.length ? { sources } : {}) });
+    }
+    const unique = Array.from(uniqueByFinding.values());
     importStats.duplicateFindings = findings.length - unique.length;
     const tool = document.querySelector("#import-tool")?.value || "Imported tool";
     if (!record.result.modules.imports) record.result.modules.imports = [];
@@ -1248,7 +1394,7 @@ async function importReport() {
     persistCases();
     render();
   } catch {
-    state.flash = "Could not parse that report. Choose a valid JSON, JSONL, or CSV export.";
+    state.flash = "Could not parse that report. Choose valid JSON, JSONL, CSV, or plain hostname-list data.";
     render();
   }
 }
@@ -1326,6 +1472,9 @@ ROOT.addEventListener("click", (event) => {
     state.selectedCaseId = caseButton.dataset.caseId;
     state.revealSensitive = false;
     state.graphSelection = "";
+    state.graphQuery = "";
+    state.graphTypeFilter = "all";
+    state.graphSourceFilter = "all";
     state.tab = "overview";
     state.flash = "";
     render();
@@ -1360,6 +1509,9 @@ ROOT.addEventListener("click", (event) => {
     state.selectedCaseId = null;
     state.revealSensitive = false;
     state.graphSelection = "";
+    state.graphQuery = "";
+    state.graphTypeFilter = "all";
+    state.graphSourceFilter = "all";
     state.tab = "overview";
     state.flash = "";
     render();
@@ -1400,6 +1552,9 @@ ROOT.addEventListener("click", (event) => {
     state.selectedCaseId = state.cases[0]?.id ?? null;
     state.revealSensitive = false;
     state.graphSelection = "";
+    state.graphQuery = "";
+    state.graphTypeFilter = "all";
+    state.graphSourceFilter = "all";
     state.tab = "overview";
     persistCases();
     render();
@@ -1432,6 +1587,9 @@ ROOT.addEventListener("click", (event) => {
   } else if (action === "clear-graph-selection") {
     state.graphSelection = "";
     render();
+  } else if (action === "reset-graph-zoom") {
+    state.graphZoom = 100;
+    render();
   } else if (action === "toggle-sensitive") {
     state.revealSensitive = !state.revealSensitive;
     render();
@@ -1444,7 +1602,20 @@ ROOT.addEventListener("input", (event) => {
     return;
   }
   if (event.target.matches("#relationship-search")) {
+    state.graphQuery = event.target.value;
     filterRelationshipGraph();
+    return;
+  }
+  if (event.target.matches("#relationship-zoom")) {
+    state.graphZoom = Math.max(70, Math.min(160, Number(event.target.value) || 100));
+    const svg = document.querySelector(".relationship-svg");
+    if (svg) {
+      const width = Math.round(Number(svg.dataset.graphWidth) * state.graphZoom / 100);
+      svg.style.width = `${width}px`;
+      svg.style.minWidth = `${width}px`;
+    }
+    const output = document.querySelector("#graph-zoom-value");
+    if (output) output.value = `${state.graphZoom}%`;
     return;
   }
   if (event.target.matches("#external-query")) {
@@ -1477,7 +1648,14 @@ ROOT.addEventListener("input", (event) => {
 
 ROOT.addEventListener("change", (event) => {
   if (event.target.matches("#source-directory-category, #source-directory-access")) filterSourceDirectory();
-  if (event.target.matches("#relationship-filter")) filterRelationshipGraph();
+  if (event.target.matches("#relationship-filter")) {
+    state.graphTypeFilter = event.target.value;
+    filterRelationshipGraph();
+  }
+  if (event.target.matches("#relationship-source")) {
+    state.graphSourceFilter = event.target.value;
+    filterRelationshipGraph();
+  }
   if (event.target.matches("#account-category")) {
     state.accountCategory = event.target.value;
     state.accountPreviewCategory = null;
@@ -1489,6 +1667,9 @@ ROOT.addEventListener("change", (event) => {
     state.selectedCaseId = event.target.value || null;
     state.revealSensitive = false;
     state.graphSelection = "";
+    state.graphQuery = "";
+    state.graphTypeFilter = "all";
+    state.graphSourceFilter = "all";
     state.tab = "overview";
     state.flash = "";
     render();
