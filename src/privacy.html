@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0c0b11" />
+    <meta name="description" content="How uwu-osint handles lookup values, browser cases, imported reports, and local files." />
+    <title>Privacy Policy — uwu-osint</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="legal-page">
+    <a class="skip-link" href="#main-content">Skip to policy</a>
+    <header class="legal-topbar">
+      <a class="legal-brand" href="/">uwu<span>-osint</span></a>
+      <nav class="legal-nav" aria-label="Legal pages">
+        <a href="/terms.html">Terms</a>
+        <a href="/privacy.html" aria-current="page">Privacy</a>
+        <a href="/">Back to app</a>
+      </nav>
+    </header>
+    <main class="legal-shell" id="main-content">
+      <div class="legal-heading">
+        <span class="eyebrow">UWU OSINT / LEGAL</span>
+        <h1>Privacy Policy</h1>
+        <p>Effective September 29, 2026</p>
+      </div>
+      <aside class="legal-notice" role="note">
+        <strong>Complete the operator details before public launch.</strong>
+        Replace <code>[Operator legal name]</code>, <code>[Privacy contact email]</code>, <code>[Mailing address]</code>, and <code>[Privacy responsible person, if required]</code>. This policy describes the current version run locally as documented. Revisit it before operating a hosted version or changing data flows.
+      </aside>
+      <article class="legal-content">
+        <section>
+          <h2>1. Who is responsible</h2>
+          <p><strong>[Operator legal name]</strong> (“Operator,” “we,” “us,” or “our”) operates uwu-osint (“App”). Contact us about privacy at <strong>[Privacy contact email]</strong> or <strong>[Mailing address]</strong>. Where applicable law requires a privacy lead, the responsible person is <strong>[Privacy responsible person, if required]</strong>.</p>
+          <p>This policy describes the current local-first version of the App when run on your device using the documented loopback setup. It does not describe a hosted, modified, or third-party deployment; the operator of such a deployment must publish accurate information about its own practices.</p>
+        </section>
+        <section>
+          <h2>2. Information the App handles</h2>
+          <h3>Lookup subjects and results</h3>
+          <p>You can enter a domain or URL, public IP address, ASN, username, email address, or international phone number. The App processes the lookup request through its local Python service and displays results. The query, results, timestamps, and any case notes are saved in this browser when a case is created or refreshed.</p>
+          <ul>
+            <li><strong>Domains:</strong> the domain is sent to public DNS and registration sources, certificate search, and passive hostname search. Discovered hostnames may also be resolved through public DNS.</li>
+            <li><strong>Public IP addresses and ASNs:</strong> the address or ASN is sent to the applicable public registration service selected using IANA RDAP data. An IP lookup may also query public reverse DNS.</li>
+            <li><strong>Email addresses:</strong> the full address is processed by the local service and saved as the case subject. Built-in email checks send only its domain to public DNS and registration sources; they do not check mailbox existence or identity.</li>
+            <li><strong>Phone numbers:</strong> the number is processed for E.164 formatting on the local service and saved as the case subject. The built-in phone check does not request subscriber, carrier, location, or account information from a provider.</li>
+            <li><strong>Usernames:</strong> the handle is sent to public profile websites selected from the App’s profile-check catalog. Those sites receive the requests and may record them.</li>
+          </ul>
+          <h3>External search shortcuts</h3>
+          <p>If you choose an external search shortcut, the selected provider receives the query in the search URL. This applies to AlienVault OTX, OpenCorporates, and Academic Torrents. Epieos opens without a query; you enter any email address or phone number directly on Epieos yourself. External shortcut results are not collected or saved by the App.</p>
+          <h3>Cases, notes, and exports</h3>
+          <p>Cases and notes are kept in this browser’s local storage until you delete them, use “Clear saved cases,” or clear the browser’s site data. A case may include its subject, lookup results, collection history, notes, and imported report details. Imported report details can include the source filename and processing counts. JSON or CSV exports are downloaded to a location you choose and may contain sensitive case information.</p>
+          <h3>Imported reports</h3>
+          <p>The report importer reads supported JSON, JSONL, or CSV files in the browser. It keeps in-scope hostnames and IP addresses and discards person, contact, and credential fields. The imported file itself is not uploaded by this import feature. The resulting findings, source filename, and import statistics are saved with the case.</p>
+          <h3>File metadata inspection</h3>
+          <p>When you choose a supported image or document for metadata inspection, the browser sends the file to the local loopback service on your device for parsing. The service processes it in memory and does not save the file. The displayed metadata result stays in page memory and is not added to a saved case by this feature. Metadata can contain location, author, device, or timestamp information.</p>
+        </section>
+        <section>
+          <h2>3. Why the information is used</h2>
+          <p>The App uses the information above to perform the lookup or file inspection you request, display and organize findings, save cases and notes in your browser, and create exports you request. The current local version does not require an account and has no operator-hosted case database. The App does not intentionally use case contents for advertising or sell case information.</p>
+        </section>
+        <section>
+          <h2>4. Who receives information</h2>
+          <p>Lookup values are sent only to the source services needed for the lookup you start, plus a provider you explicitly choose for an external search. Depending on the feature, these can include Cloudflare DNS over HTTPS, an IANA-selected RDAP registry, crt.sh, HackerTarget, public profile websites in the selected account-check catalog, and the external search providers listed above.</p>
+          <p>These services are independent of the Operator. Their systems may receive the query and ordinary connection information, such as your public IP address, request time, and technical request details. Their own privacy notices and retention rules apply. The Operator cannot control how a provider handles information after it receives a request.</p>
+          <p>Case data is not sent to an Operator database by the current local version. The local Python service suppresses access logs containing request targets and query values and does not keep an application database. Network lookups still leave your device for the selected public sources.</p>
+        </section>
+        <section>
+          <h2>5. Storage and retention</h2>
+          <ul>
+            <li><strong>Browser cases:</strong> remain in local storage until you delete the case, clear all saved cases, or clear site data. The App does not set a separate automatic deletion period.</li>
+            <li><strong>Exports:</strong> remain wherever you save them and are under your control.</li>
+            <li><strong>Lookup processing:</strong> the local service handles requests while they run and does not maintain a case database or log query values. Provider-side retention is determined by each provider.</li>
+            <li><strong>Metadata inspection:</strong> the file is parsed in memory by the local service and is not saved by the App; the result remains in page memory until the page is refreshed or closed.</li>
+          </ul>
+          <p>Local browser storage is not encrypted by the App. Anyone with access to your browser profile or device may be able to access saved cases. Protect your device and browser profile, and avoid using the App for information you cannot safely store there.</p>
+        </section>
+        <section>
+          <h2>6. Your choices and privacy requests</h2>
+          <p>You can review or delete saved cases using the App’s case controls, clear all cases with “Clear saved cases,” and clear the App’s site data using your browser settings. You can also choose not to start a lookup, not to use an external search, and not to import a report or inspect a file. Deleting a local case does not delete information already received by an independent provider or copies in an export you downloaded.</p>
+          <p>Depending on the law that applies, you may have rights to request access to, correction of, or deletion of personal information, or to raise a concern. Send requests to <strong>[Privacy contact email]</strong> and include enough detail for us to understand the request. We will respond as required by applicable law. If you are in a jurisdiction with a privacy regulator, you may also have the right to contact that regulator.</p>
+        </section>
+        <section>
+          <h2>7. Security</h2>
+          <p>The current app server is intended to bind to loopback on your device and uses request validation, size limits, and bounded concurrency. These safeguards do not make your device, browser, network, or third-party providers risk-free. Use an up-to-date browser and operating system, limit device access, and protect any exports.</p>
+        </section>
+        <section>
+          <h2>8. Children</h2>
+          <p>The App is a general research utility and is not designed to collect information directly from children. If you believe a child has provided personal information to the Operator, contact <strong>[Privacy contact email]</strong>.</p>
+        </section>
+        <section>
+          <h2>9. Changes to this policy</h2>
+          <p>We may update this policy to reflect changes to the App, its providers, or legal requirements. We will post the updated text here and change the effective date. If a change materially affects how a hosted version handles personal information, the Operator should provide any notice or choice required by law.</p>
+        </section>
+        <section>
+          <h2>10. Contact</h2>
+          <p>Privacy questions and requests: <strong>[Privacy contact email]</strong> · <strong>[Mailing address]</strong>.</p>
+        </section>
+      </article>
+      <footer class="legal-footer"><span>uwu-osint · Privacy Policy</span><span><a href="/terms.html">Terms of Use</a> · <a href="/">Return to app</a></span></footer>
+    </main>
+  </body>
+</html>

@@ -1196,7 +1196,13 @@ class Handler(BaseHTTPRequestHandler):
             except LookupError as exc:
                 self.send_json(503, {"error": str(exc)})
             return
-        files = {"/": "index.html", "/app.js": "app.js", "/styles.css": "styles.css"}
+        files = {
+            "/": "index.html",
+            "/app.js": "app.js",
+            "/styles.css": "styles.css",
+            "/terms.html": "terms.html",
+            "/privacy.html": "privacy.html",
+        }
         file_name = files.get(path)
         if not file_name:
             self.send_json(404, {"error": "Not found"})
