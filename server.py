@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -40,7 +40,8 @@ PROFILE_LOCK = threading.Lock()
 PROFILE_CACHE: tuple[float, dict] | None = None
 PROFILE_CACHE_TTL_SECONDS = 12 * 60 * 60
 PROFILE_CACHE_MAX_STALE_SECONDS = 3 * 24 * 60 * 60
-PROFILE_DATA_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
+PROFILE_DATA_REVISION = "062bcfe48df79fa618e96edc79dc9673f3fe5643"
+PROFILE_DATA_URL = f"https://raw.githubusercontent.com/WebBreacher/WhatsMyName/{PROFILE_DATA_REVISION}/wmn-data.json"
 PROFILE_DATA_LICENSE = "CC BY-SA 4.0"
 SPECIAL_USE_SUFFIXES = ("alt", "example", "invalid", "localhost", "onion", "test", "local", "internal", "lan", "home", "arpa")
 SPECIAL_USE_DOMAINS = ("example.com", "example.net", "example.org")
@@ -196,6 +197,11 @@ def normalize_email(value: str) -> dict:
     return {"type": "email", "value": f"{local}@{domain}", "address": f"{local}@{domain}", "domain": domain}
 
 
+def normalize_email_domain(value: str) -> dict:
+    domain = normalize_domain(value)
+    return {"type": "email-domain", "value": domain, "domain": domain}
+
+
 def normalize_phone(value: str) -> dict:
     raw = value.strip()
     compact = re.sub(r"[\s().-]", "", raw)
@@ -207,7 +213,7 @@ def normalize_phone(value: str) -> dict:
 def identify(value: str) -> dict:
     raw = value.strip()
     if not raw:
-        raise LookupError("Enter a domain or URL, public IP, ASN, @username, email, or international phone number.")
+        raise LookupError("Enter a domain or URL, public IP, ASN, @username, email, email-domain:example.com, or international phone number.")
     username_input = raw[1:] if raw.startswith("@") else raw[9:].strip() if raw.lower().startswith("username:") else None
     if username_input is not None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{2,40}", username_input):
@@ -215,6 +221,8 @@ def identify(value: str) -> dict:
         return {"type": "username", "value": username_input, "handle": username_input}
     if raw.lower().startswith("email:"):
         return normalize_email(raw[6:].strip())
+    if raw.lower().startswith("email-domain:"):
+        return normalize_email_domain(raw.split(":", 1)[1].strip())
     phone_input = raw[6:].strip() if raw.lower().startswith("phone:") else raw
     if raw.lower().startswith("phone:") or phone_input.startswith("+"):
         return normalize_phone(phone_input)
@@ -691,7 +699,7 @@ def profile_definitions() -> dict:
             return cached[1]
     try:
         data = fetch_json(PROFILE_DATA_URL, expected_host="raw.githubusercontent.com")
-        if not isinstance(data, dict) or not isinstance(data.get("sites"), list):
+        if not isinstance(data, dict) or not isinstance(data.get("sites"), list) or len(data["sites"]) > 20_000:
             raise LookupError("The public profile catalog returned an unexpected document.")
     except LookupError:
         if cached and time.monotonic() - cached[0] <= PROFILE_CACHE_MAX_STALE_SECONDS:
@@ -702,14 +710,64 @@ def profile_definitions() -> dict:
     return data
 
 
-def get_account_categories() -> list[str]:
+def profile_site_selection(category: str = "all", limit: int = 25) -> tuple[dict, list[str], list[dict]]:
     data = profile_definitions()
-    categories = {
-        str(site.get("cat", "other")).strip()[:60]
-        for site in data["sites"]
-        if isinstance(site, dict) and str(site.get("cat", "other")).strip()
+    safe_sites = [
+        site for site in data["sites"]
+        if isinstance(site, dict)
+        and isinstance(site.get("uri_check"), str)
+        and len(site["uri_check"]) <= 2_048
+        and "{account}" in site["uri_check"]
+        and not site.get("protection")
+    ]
+    categories = sorted(
+        {str(site.get("cat", "other")).strip()[:60] or "other" for site in safe_sites},
+        key=str.casefold,
+    )
+    if category != "all" and category not in categories:
+        raise LookupError("Choose a category listed in the account footprint view.")
+    grouped: dict[str, list[dict]] = {}
+    for site in sorted(safe_sites, key=lambda item: (str(item.get("cat", "")), str(item.get("name", "")))):
+        site_category = str(site.get("cat", "other")).strip()[:60] or "other"
+        if category == "all" or site_category == category:
+            grouped.setdefault(site_category, []).append(site)
+    maximum = max(1, min(int(limit), 40))
+    selected = []
+    while len(selected) < maximum and any(grouped.values()):
+        for category_name in sorted(grouped, key=str.casefold):
+            if grouped[category_name] and len(selected) < maximum:
+                selected.append(grouped[category_name].pop(0))
+    return data, categories, selected
+
+
+def get_account_categories() -> list[str]:
+    _, categories, _ = profile_site_selection()
+    return categories
+
+
+def get_account_preview(category: str = "all", limit: int = 25) -> dict:
+    data, categories, selected = profile_site_selection(category, limit)
+    preview = []
+    for site in selected:
+        try:
+            check_url = str(site["uri_check"]).format(account="uwu-osint-preview")
+            parsed = urlsplit(check_url)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
+                continue
+            host = normalize_domain(parsed.hostname.lower())
+        except (KeyError, LookupError, ValueError):
+            continue
+        preview.append({
+            "name": str(site.get("name", "Unknown site"))[:80],
+            "category": str(site.get("cat", "other"))[:60],
+            "host": host,
+        })
+    return {
+        "categories": categories,
+        "preview": preview,
+        "catalogRevision": PROFILE_DATA_REVISION,
+        "catalogStale": data.get("_catalogStale") is True,
     }
-    return sorted(categories, key=str.casefold)
 
 
 def _check_profile(site: dict, handle: str) -> dict:
@@ -723,41 +781,25 @@ def _check_profile(site: dict, handle: str) -> dict:
         missing_text = str(site.get("m_string", ""))
         if status_code == expected_code and expected_text and expected_text in body and (not missing_text or missing_text not in body):
             result = "found"
+            evidence = "Expected profile marker matched the response."
         elif status_code == missing_code and (not missing_text or missing_text in body):
             result = "not_found"
+            evidence = "The catalog's not-found status rule matched."
         elif missing_text and missing_text in body:
             result = "not_found"
+            evidence = "The catalog's not-found text rule matched."
         else:
             result = "unknown"
-        return {"site": name, "category": site.get("cat", "other"), "status": result, "url": profile_url}
+            evidence = "The response did not match either catalog rule."
+        return {"site": name, "category": site.get("cat", "other"), "status": result, "evidence": evidence, "url": profile_url}
     except (LookupError, KeyError, ValueError, OSError):
-        return {"site": name, "category": site.get("cat", "other"), "status": "unknown", "url": None}
+        return {"site": name, "category": site.get("cat", "other"), "status": "unknown", "evidence": "The request was blocked, unavailable, or could not be checked against the rule.", "url": None}
 
 
 def get_account_footprint(entity: dict, authorized: bool, category: str = "all", limit: int = 25) -> dict:
     if not authorized:
         raise LookupError("Confirm this is an account you own or are authorized to audit.")
-    data = profile_definitions()
-    categories = sorted({str(site.get("cat", "other")) for site in data["sites"] if isinstance(site, dict)})
-    if category != "all" and category not in categories:
-        raise LookupError("Choose a category listed in the account footprint view.")
-    safe_sites = [
-        site for site in data["sites"]
-        if isinstance(site, dict)
-        and isinstance(site.get("uri_check"), str)
-        and "{account}" in site["uri_check"]
-        and not site.get("protection")
-        and (category == "all" or str(site.get("cat", "other")) == category)
-    ]
-    maximum = max(1, min(int(limit), 40))
-    grouped: dict[str, list[dict]] = {}
-    for site in sorted(safe_sites, key=lambda item: (str(item.get("cat", "")), str(item.get("name", "")))):
-        grouped.setdefault(str(site.get("cat", "other")), []).append(site)
-    selected = []
-    while len(selected) < maximum and any(grouped.values()):
-        for category_name in sorted(grouped, key=str.casefold):
-            if grouped[category_name] and len(selected) < maximum:
-                selected.append(grouped[category_name].pop(0))
+    data, _, selected = profile_site_selection(category, limit)
     results = []
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(_check_profile, site, entity["handle"]) for site in selected]
@@ -776,6 +818,7 @@ def get_account_footprint(entity: dict, authorized: bool, category: str = "all",
         "notFound": sum(item["status"] == "not_found" for item in results),
         "unknown": sum(item["status"] == "unknown" for item in results),
         "sites": results,
+        "catalogRevision": PROFILE_DATA_REVISION,
         "catalogStale": data.get("_catalogStale") is True,
         "notice": ("The profile catalog could not refresh; cached rules were used. " if data.get("_catalogStale") else "") + "A match only means the public profile URL responded as expected. It does not prove who controls the account.",
     }
@@ -1071,7 +1114,7 @@ def investigate(value: str, authorized: bool = False, category: str = "all", lim
         raise LookupError("Confirm this is your account or contact detail, or that you have permission to research it.")
     if entity["type"] == "username":
         modules["accounts"] = run_module(get_account_footprint, entity, authorized, category, limit)
-    elif entity["type"] == "email":
+    elif entity["type"] in {"email", "email-domain"}:
         domain_entity = {"type": "domain", "value": entity["domain"]}
         with ThreadPoolExecutor(max_workers=2) as pool:
             dns_future = pool.submit(run_module, get_dns, entity["domain"])
@@ -1192,7 +1235,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/account-categories":
             try:
-                self.send_json(200, {"categories": get_account_categories()})
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                category = query.get("category", ["all"])[0]
+                self.send_json(200, get_account_preview(category))
             except LookupError as exc:
                 self.send_json(503, {"error": str(exc)})
             return
@@ -1248,7 +1293,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise LookupError("The request body must be an object.")
             if path == "/api/investigate":
                 if not isinstance(payload.get("query"), str):
-                    raise LookupError("Enter a domain or URL, public IP, ASN, @username, email, or international phone number.")
+                    raise LookupError("Enter a domain or URL, public IP, ASN, @username, email, email-domain:example.com, or international phone number.")
                 category = payload.get("category", "all")
                 limit = payload.get("limit", 25)
                 if not isinstance(category, str) or not isinstance(limit, int) or isinstance(limit, bool):
