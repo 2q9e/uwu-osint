@@ -12,6 +12,8 @@ A local-first workspace for authorized research on public internet infrastructur
 - **Account footprint:** check a username you own or are authorized to audit against up to 25 public profile URLs. Results are marked as possible matches, not proof of identity or account ownership.
 - **Local metadata inspection:** recognize selected JPEG, PNG, TIFF, PDF, and DOCX metadata fields. Files are sent only to the loopback app server, parsed in memory, and not saved. An empty result means this parser found no supported fields; it does not prove the file has no metadata.
 - **Report workspace:** import JSON, JSONL, and CSV reports in the browser. The importer keeps only in-scope hostnames and IP addresses, drops person/contact/credential fields, and records the filename, input count, invalid lines, duplicates, and any row or finding caps.
+- **Infrastructure relationship graph:** view DNS, certificate, hostname, reverse-DNS, and RDAP observations for the selected domain, email-domain-only, IP, or ASN case. Edges retain source and collection time; the graph is explicitly not an ownership or identity verdict. Filter and select nodes, review the evidence ledger, and export a GraphML graph for compatible tools. It uses saved case data only and makes no new provider requests.
+- **Research source guide:** search and filter public directories and specialist products by capability. Cards distinguish external products from built-in modules and summarize their advertised access model; verify current terms and pricing at each provider.
 - **External source shortcuts:** launch single authorized searches in AlienVault OTX, OpenCorporates, and Academic Torrents. Epieos opens for a manual email or phone search without the app submitting the value. Results remain on the provider's site and are not collected by the app.
 - **Case notebook:** cases and notes stay in browser local storage. Refresh history keeps up to five compact summaries per case. Export a case to JSON when you need a portable copy, or clear saved cases and notes from the workspace controls.
 
@@ -43,6 +45,8 @@ The server binds to loopback (`127.0.0.1`), accepts only loopback Host headers, 
 ## External source searches
 
 Open **Built-in modules → Search external sources**, enter a query, confirm authorization, then choose one provider. Each click opens one provider page in a new tab. Epieos accepts a manually entered email or international phone search; the app opens its site without submitting the value. Other providers receive the query in their search URL. OTX URL lookups send the complete URL; the app rejects embedded credentials and requires a separate confirmation when the URL has a path, query, or fragment. Remove tokens and private data first. Results are not saved by uwu-osint.
+
+The **Research source guide** lists third-party directories and products with links to vendor details. It does not connect to those services or send a case subject. Its access notes are summaries; check the provider for current plan and licensing terms.
 
 ## Data sources
 
