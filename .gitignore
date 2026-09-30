@@ -1,0 +1,9 @@
+# Keep local-only operator data and credentials out of version control.
+/SENSTIVE INFO DO NOT PUT ON GITHUB/
+/REFERENCE DO NOT PUT IN GITHUB/
+/.env
+/.env.*
+/*.sqlite
+/*.sqlite3
+__pycache__/
+*.py[cod]

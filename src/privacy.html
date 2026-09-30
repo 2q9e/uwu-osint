@@ -43,7 +43,7 @@
             <li><strong>Public IP addresses and ASNs:</strong> the address or ASN is sent to the applicable public registration service selected using IANA RDAP data. An IP lookup may also query public reverse DNS.</li>
             <li><strong>Email addresses:</strong> the full address is processed by the local service and saved as the case subject. Built-in email checks send only its domain to public DNS and registration sources; they do not check mailbox existence or identity.</li>
             <li><strong>Phone numbers:</strong> the number is processed for E.164 formatting on the local service and saved as the case subject. The built-in phone check does not request subscriber, carrier, location, or account information from a provider.</li>
-            <li><strong>Usernames:</strong> the handle is sent to public profile websites selected from the App’s profile-check catalog. Those sites receive the requests and may record them.</li>
+            <li><strong>Usernames:</strong> the App fetches public profile-check definitions from the <a href="https://github.com/WebBreacher/WhatsMyName" target="_blank" rel="noopener noreferrer">WhatsMyName catalog on GitHub</a>; that catalog request does not contain your handle. The handle is then sent to public profile websites selected by those definitions. Those profile sites receive the requests and may record them.</li>
           </ul>
           <h3>External search shortcuts</h3>
           <p>If you choose an external search shortcut, the selected provider receives the query in the search URL. This applies to AlienVault OTX, OpenCorporates, and Academic Torrents. Epieos opens without a query; you enter any email address or phone number directly on Epieos yourself. External shortcut results are not collected or saved by the App.</p>
@@ -52,7 +52,7 @@
           <h3>Imported reports</h3>
           <p>The report importer reads supported JSON, JSONL, or CSV files in the browser. It keeps in-scope hostnames and IP addresses and discards person, contact, and credential fields. The imported file itself is not uploaded by this import feature. The resulting findings, source filename, and import statistics are saved with the case.</p>
           <h3>File metadata inspection</h3>
-          <p>When you choose a supported image or document for metadata inspection, the browser sends the file to the local loopback service on your device for parsing. The service processes it in memory and does not save the file. The displayed metadata result stays in page memory and is not added to a saved case by this feature. Metadata can contain location, author, device, or timestamp information.</p>
+          <p>When you choose a supported image or document for metadata inspection, the browser sends the file and its filename to the local loopback service on your device for parsing. The service processes them in memory and does not save the file. The displayed filename and metadata result stay in page memory and are not added to a saved case by this feature. Metadata can contain location, author, device, or timestamp information.</p>
         </section>
         <section>
           <h2>3. Why the information is used</h2>
@@ -60,7 +60,7 @@
         </section>
         <section>
           <h2>4. Who receives information</h2>
-          <p>Lookup values are sent only to the source services needed for the lookup you start, plus a provider you explicitly choose for an external search. Depending on the feature, these can include Cloudflare DNS over HTTPS, an IANA-selected RDAP registry, crt.sh, HackerTarget, public profile websites in the selected account-check catalog, and the external search providers listed above.</p>
+          <p>Lookup values are sent only to the source services needed for the lookup you start, plus a provider you explicitly choose for an external search. Depending on the feature, these can include Cloudflare DNS over HTTPS, an IANA-selected RDAP registry, crt.sh, HackerTarget, public profile websites in the selected account-check catalog, and the external search providers listed above. GitHub receives a request to download the public profile-check definitions when needed; the username is sent to the profile sites, not with that catalog request.</p>
           <p>These services are independent of the Operator. Their systems may receive the query and ordinary connection information, such as your public IP address, request time, and technical request details. Their own privacy notices and retention rules apply. The Operator cannot control how a provider handles information after it receives a request.</p>
           <p>Case data is not sent to an Operator database by the current local version. The local Python service suppresses access logs containing request targets and query values and does not keep an application database. Network lookups still leave your device for the selected public sources.</p>
         </section>
