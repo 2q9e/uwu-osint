@@ -98,10 +98,10 @@ function sourcesFor(result) {
   if (modules.subdomains) {
     for (const provider of modules.subdomains.providers || []) {
       sources.push({
-        title: provider.name,
+        title: provider.archive ? `${provider.name} · ${provider.archive}` : provider.name,
         name: provider.name,
         module: { ...modules.subdomains, status: provider.status, source: provider.source },
-        icon: provider.name.includes("Certificate") ? "▤" : "⌘",
+        icon: provider.name.includes("Certificate") ? "▤" : provider.name.includes("Crawl") ? "◷" : "⌘",
       });
     }
   }
@@ -308,6 +308,7 @@ function disclosureText(value, fallbackEntity = {}, domainSources = DEFAULT_DOMA
     const passiveSources = [];
     if (domainSources.includes("crtsh")) passiveSources.push("crt.sh certificate search");
     if (domainSources.includes("hackertarget")) passiveSources.push("HackerTarget passive host search");
+    if (domainSources.includes("commoncrawl")) passiveSources.push("Common Crawl historical URL index");
     const selected = passiveSources.length ? `the selected passive sources (${passiveSources.join(" and ")})` : "no passive hostname source";
     return `The hostname is sent to Cloudflare DNS, IANA RDAP/bootstrap, and ${selected}. URL paths are ignored by the built-in lookup. Discovered hostnames are resolved with Cloudflare DNS. The case and results are stored in this browser.`;
   }
@@ -450,7 +451,10 @@ function relationshipGraphData(record) {
     for (const host of (modules.subdomains?.hosts || []).slice(0, 50)) {
       if (!inDomainScope(host.name)) continue;
       const node = addNode("host", host.name, { kind: "host", level: 1, detail: host.resolutionAttempted ? `Hostname · DNS ${host.resolutionStatus || "checked"}` : "Hostname · not resolved in this collection" });
-      for (const source of (host.sources || ["Passive hostname source"]).slice(0, 4)) addEdge(root, node, "hostname observed", source, modules.subdomains?.queriedAt);
+      for (const source of (host.sources || ["Passive hostname source"]).slice(0, 4)) {
+        const archivedAt = host.archiveDates?.[source] || "";
+        addEdge(root, node, source === "Common Crawl" ? "hostname in archived crawl" : "hostname observed", source, modules.subdomains?.queriedAt, archivedAt ? `Last archived ${shortDate(archivedAt)}` : "", archivedAt);
+      }
       for (const address of (host.addresses || []).slice(0, 3)) {
         const ip = addNode("ip", address, { kind: "ip", level: 2, detail: "Public address returned by DNS resolution" });
         addEdge(node, ip, "resolves to", "Cloudflare DNS", modules.subdomains?.queriedAt);
@@ -539,7 +543,7 @@ function relationshipTimeline(record, graph) {
       date: edge.observedAt,
       collectedAt: edge.queriedAt,
       source: edge.source,
-      title: "Certificate name first seen",
+      title: edge.source === "Common Crawl" ? "Hostname last archived" : "Certificate name first seen",
       detail: edge.to.label,
       kind: "event",
     });
@@ -616,7 +620,7 @@ function subdomainsContent(record) {
     ${module.status === "partial" ? `<div class="notice warning-notice">Some selected sources did not return data. Results from successful sources remain available below.</div>` : ""}
     ${module.truncated ? `<div class="notice">At least one public source was capped, or more than 500 names were found. This case may contain a partial result set.</div>` : ""}
     <section class="panel graph-panel"><div class="panel-heading"><div><span class="eyebrow">CORRELATED HOSTS</span><h3>${esc(record.result.entity?.value)}</h3></div><span class="panel-caption">First 18 hosts shown in graph</span></div>${networkGraph(module, record.result.entity?.value)}</section>
-    <div class="panel table-panel host-table"><table><thead><tr><th>Hostname</th><th>Public addresses</th><th>Sources</th></tr></thead><tbody>${hosts.map((host) => `<tr><td><code>${esc(host.name)}</code></td><td>${host.addresses?.length ? host.addresses.map((address) => `<code>${esc(address)}</code>`).join("<br />") : `<span class="muted" title="${esc((host.resolutionErrors || []).join(" · "))}">${host.resolutionAttempted ? host.resolutionStatus === "error" ? "Lookup failed" : host.resolutionStatus === "partial" ? "Partial DNS error" : "No public address returned" : "Not checked (limit 25)"}</span>`}</td><td>${(host.sources || []).map((source) => `<span class="tag">${esc(source)}</span>`).join(" ")}</td></tr>`).join("") || `<tr><td colspan="3">No hostnames returned.</td></tr>`}</tbody></table></div>
+    <div class="panel table-panel host-table"><table><thead><tr><th>Hostname</th><th>Public addresses</th><th>Sources</th><th>Last archived</th></tr></thead><tbody>${hosts.map((host) => `<tr><td><code>${esc(host.name)}</code></td><td>${host.addresses?.length ? host.addresses.map((address) => `<code>${esc(address)}</code>`).join("<br />") : `<span class="muted" title="${esc((host.resolutionErrors || []).join(" · "))}">${host.resolutionAttempted ? host.resolutionStatus === "error" ? "Lookup failed" : host.resolutionStatus === "partial" ? "Partial DNS error" : "No public address returned" : "Not checked (limit 25)"}</span>`}</td><td>${(host.sources || []).map((source) => `<span class="tag">${esc(source)}</span>`).join(" ")}</td><td>${host.archiveDates?.["Common Crawl"] ? esc(shortDate(host.archiveDates["Common Crawl"])) : "—"}</td></tr>`).join("") || `<tr><td colspan="4">No hostnames returned.</td></tr>`}</tbody></table></div>
     ${(module.providers || []).map((provider) => provider.status === "error" ? `<div class="notice warning-notice">${esc(provider.name)}: ${esc(provider.error || "Source unavailable.")}</div>` : "").join("")}
     ${sourceCards({ modules: { subdomains: module } })}`;
 }
@@ -678,7 +682,8 @@ function ptrContent(record) {
 
 function toolsDirectory() {
   const cards = [
-    { title: "Domain footprint", category: "PUBLIC INFRASTRUCTURE", detail: "Join DNS answers, registry data, certificate names, and passive hostname results into one scoped view.", icon: "⌘" },
+    { title: "Domain footprint", category: "PUBLIC INFRASTRUCTURE", detail: "Join DNS answers, registry data, certificate names, passive hostnames, and optional historical crawl records into one scoped view.", icon: "⌘" },
+    { title: "Historical host index", category: "PASSIVE ARCHIVE", detail: "Search the latest Common Crawl URL index for archived pages on the domain and its subdomains. Archive dates are historical observations, not current DNS or proof that a host is still live.", icon: "◷" },
     { title: "Account footprint", category: "SELF-AUDIT", detail: "Check a username you own across a bounded set of public profile URLs. Matches are candidates, not identity proof.", icon: "◎" },
     { title: "Email domain audit", category: "DOMAIN DNS", detail: "Review MX, SPF, and DMARC records from an email address, or enter email-domain:example.com to check a domain without storing a mailbox identifier.", icon: "✉" },
     { title: "Phone format check", category: "LOCAL VALIDATION", detail: "Normalize an international number to E.164 syntax locally without querying a subscriber, carrier, or location.", icon: "+" },
@@ -701,6 +706,7 @@ function sourceDirectoryPanel() {
   const sources = [
     { name: "OSINT Framework", category: "Directory", tier: "public", access: "Free directory · entry access varies", inputs: "Research topic or entity type", outputs: "Curated external tools and links", detail: "A searchable directory that groups public research resources by subject and workflow. It points to third-party tools; it does not collect results itself.", url: "https://osintframework.com/", icon: "⌘" },
     { name: "Subfinder", category: "Domain discovery", tier: "public", access: "Open-source CLI · some sources need API keys", inputs: "Authorized root domain", outputs: "Passive hostnames and optional source labels", detail: "A focused passive subdomain enumerator designed for speed. Its JSON output can retain the source list; active resolution and IP output are separate options.", url: "https://github.com/projectdiscovery/subfinder", icon: "⌁" },
+    { name: "Common Crawl URL Index", category: "Historical web", tier: "public", access: "Free public archive index · bounded query", inputs: "Authorized root domain", outputs: "Archived page hostnames and capture dates", detail: "An optional built-in query of the latest public crawl index. Results show where pages were archived, not whether a host is currently online.", url: "https://index.commoncrawl.org/", icon: "◷" },
     { name: "theHarvester", category: "Reconnaissance", tier: "public", access: "Open-source · source access varies", inputs: "Authorized domain or organization", outputs: "Hostnames, IPs, URLs, and other source findings", detail: "Collects findings across many source categories and records source outcomes. This app’s importer intentionally keeps only in-scope infrastructure fields.", url: "https://github.com/laramies/theHarvester", icon: "⌁" },
     { name: "Amass", category: "Domain discovery", tier: "public", access: "Open-source · data source access varies", inputs: "Root domain and selected collection mode", outputs: "Discovered names, source data, graph associations", detail: "Supports broad domain enumeration, source selection, passive mode, and a graph-oriented local data store. Active modes require explicit scope review.", url: "https://github.com/owasp-amass/amass/wiki/User-Guide", icon: "⤳" },
     { name: "SpiderFoot", category: "Automated OSINT", tier: "public", access: "Open-source · optional modules need provider access", inputs: "Authorized seed entity and selected modules", outputs: "Correlated module events and graph exports", detail: "Automates collection and correlation across configurable modules, with JSON, CSV, and graph export options. External module traffic and credentials remain controlled by SpiderFoot.", url: "https://github.com/smicallef/spiderfoot", icon: "⤳" },
@@ -925,6 +931,7 @@ function captureEvidenceSnapshot(result) {
   const hostProviders = hostModule.providers || [];
   const certificateProvider = hostProviders.find((item) => item.id === "crtsh");
   const hostSearchProvider = hostProviders.find((item) => item.id === "hackertarget");
+  const commonCrawlProvider = hostProviders.find((item) => item.id === "commoncrawl");
   const sources = {
     "crt.sh": {
       status: certificateModule.status || certificateProvider?.status || "unknown",
@@ -934,10 +941,15 @@ function captureEvidenceSnapshot(result) {
       status: hostSearchProvider?.status || "unknown",
       complete: hostSearchProvider?.status === "ok" && !hostSearchProvider?.truncated && !hostModule.truncated,
     },
+    "Common Crawl": {
+      status: commonCrawlProvider?.status || "unknown",
+      complete: commonCrawlProvider?.status === "ok" && !commonCrawlProvider?.truncated && !hostModule.truncated,
+    },
   };
   for (const certificate of certificateModule.names || []) add("Hostname", certificate.name, "crt.sh");
   for (const host of hostModule.hosts || []) {
     if ((host.sources || []).includes("HackerTarget")) add("Hostname", host.name, "HackerTarget");
+    if ((host.sources || []).includes("Common Crawl")) add("Hostname", host.name, "Common Crawl");
   }
   const allEvidence = [...evidence.values()].sort((a, b) => a.source.localeCompare(b.source) || a.value.localeCompare(b.value));
   const limit = 2500;
@@ -1023,7 +1035,7 @@ function render() {
         <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>${!inTools && phone ? "LOCAL FORMAT CHECK" : !inTools && email ? "DOMAIN-ONLY SOURCE QUERIES" : "PUBLIC SOURCE QUERIES"}</span><div class="mobile-case-tools">${!inTools && state.cases.length ? `<label class="sr-only" for="mobile-case-select">Switch saved case</label><select id="mobile-case-select"><option value="" ${record ? "" : "selected"}>New case</option>${state.cases.map((item) => `<option value="${esc(item.id)}" ${item.id === record?.id ? "selected" : ""}>${esc(caseSubjectLabel(item))}</option>`).join("")}</select>` : ""}<button data-action="new-case">＋ New</button>${state.cases.length ? `<button class="mobile-clear-cases" data-action="clear-cases" aria-label="Clear all saved cases" title="Clear all saved cases">Clear</button>` : ""}</div>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
         <div class="content-wrap">
           <section class="page-heading"><div><span class="eyebrow">${inTools ? "NATIVE RESEARCH MODULES" : `INTELLIGENCE / ${record ? esc(record.result.entity?.type?.toUpperCase()) : "START HERE"}`}</span><h1>${inTools ? `Research <em>modules.</em>` : `Public surface <em>research.</em>`}</h1><p>${inTools ? "Built-in collection, local file inspection, and report interchange." : "Research public infrastructure, self-audit accounts, check an email domain without storing a mailbox, and validate phone format locally."}</p></div><div class="heading-ornament"><div class="ornament-ring ring-one"></div><div class="ornament-ring ring-two"></div><div class="ornament-core">uwu</div></div></section>
-          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(initialQuery)}" placeholder="Domain · IP · ASN · @username · email · email-domain:example.com · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email · email-domain:example.com · E.164 phone format</div><div class="domain-source-options" id="domain-source-options" ${showDomainSources ? "" : "hidden"}><span class="domain-source-heading">PASSIVE HOST SOURCES</span><label><input type="checkbox" name="domainSource" value="crtsh" ${savedDomainSources.includes("crtsh") ? "checked" : ""} ${state.busy ? "disabled" : ""} /><span><b>Certificate transparency</b><small>Names in public certificate logs</small></span></label><label><input type="checkbox" name="domainSource" value="hackertarget" ${savedDomainSources.includes("hackertarget") ? "checked" : ""} ${state.busy ? "disabled" : ""} /><span><b>HackerTarget Host Search</b><small>Passive hostname and address results</small></span></label><p>Choose which providers receive the domain. DNS and registration checks remain part of domain collection.</p></div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>${privacyDisclosure(record, privacyQuery)}`}
+          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(initialQuery)}" placeholder="Domain · IP · ASN · @username · email · email-domain:example.com · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email · email-domain:example.com · E.164 phone format</div><div class="domain-source-options" id="domain-source-options" ${showDomainSources ? "" : "hidden"}><span class="domain-source-heading">PASSIVE HOST SOURCES</span><label><input type="checkbox" name="domainSource" value="crtsh" ${savedDomainSources.includes("crtsh") ? "checked" : ""} ${state.busy ? "disabled" : ""} /><span><b>Certificate transparency</b><small>Names in public certificate logs</small></span></label><label><input type="checkbox" name="domainSource" value="hackertarget" ${savedDomainSources.includes("hackertarget") ? "checked" : ""} ${state.busy ? "disabled" : ""} /><span><b>HackerTarget Host Search</b><small>Passive hostname and address results</small></span></label><label><input type="checkbox" name="domainSource" value="commoncrawl" ${savedDomainSources.includes("commoncrawl") ? "checked" : ""} ${state.busy ? "disabled" : ""} /><span><b>Common Crawl archive</b><small>Last seen in archived public pages</small></span></label><p>Choose which providers receive the domain. DNS and registration checks remain part of domain collection.</p></div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>${privacyDisclosure(record, privacyQuery)}`}
           ${inTools ? "" : flashMessage()}
           ${inTools ? toolsDirectory() : record ? `
             <section class="case-title-row"><div><div class="subject-line"><span class="subject-dot"></span><h2>${esc(subjectDisplayLabel(record))}</h2><span class="type-tag">${esc(record.result.entity?.type || "subject")}</span>${sensitiveCase ? `<button class="text-button reveal-subject-button" data-action="toggle-sensitive" aria-pressed="${state.revealSensitive}">${state.revealSensitive ? "Hide subject" : "Reveal subject"}</button>` : ""}</div><p>Case opened ${esc(shortDate(record.createdAt))} <span class="middle-dot">·</span> Latest collection ${esc(shortDate(record.result.generatedAt || record.updatedAt))}</p></div><button class="delete-button" data-action="delete-case">Delete case <span>×</span></button></section>
@@ -1260,7 +1272,8 @@ function exportEvidenceCsv(record) {
   }
   for (const host of modules.subdomains?.hosts || []) {
     const providers = (host.sources || []).join(", ") || "Passive host discovery";
-    add("Subdomain", host.name, providers, modules.subdomains.queriedAt);
+    const archivedAt = host.archiveDates?.["Common Crawl"];
+    add("Subdomain", host.name, providers, modules.subdomains.queriedAt, archivedAt ? `Last archived ${archivedAt}` : "");
     for (const address of host.addresses || []) add("Resolved address", address, providers, modules.subdomains.queriedAt, host.name);
   }
   for (const site of modules.accounts?.sites || []) {

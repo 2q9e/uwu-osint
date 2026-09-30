@@ -536,10 +536,10 @@ def list_open_source_tools() -> dict:
         {
             "id": "domain-footprint",
             "name": "Domain footprint",
-            "purpose": "Combine registry, certificate, common DNS, DNSSEC, and passive host-search records.",
+            "purpose": "Combine registry, DNS, certificate, passive hostname, and optional historical crawl observations.",
             "available": True,
             "mode": "Built-in collectors",
-            "url": "https://api.hackertarget.com/hostsearch/",
+            "url": "https://index.commoncrawl.org/",
             "integration": "native",
         },
         {
@@ -881,6 +881,7 @@ def lookup_host_addresses(host: str) -> dict:
     }
 
 
+DOMAIN_SOURCE_IDS = ("crtsh", "hackertarget", "commoncrawl")
 DOMAIN_SOURCE_DEFAULTS = ("crtsh", "hackertarget")
 
 
@@ -890,7 +891,7 @@ def normalize_domain_sources(value) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise LookupError("Choose one or more supported passive hostname sources.")
     selected = tuple(dict.fromkeys(value))
-    unknown = set(selected) - set(DOMAIN_SOURCE_DEFAULTS)
+    unknown = set(selected) - set(DOMAIN_SOURCE_IDS)
     if unknown:
         raise LookupError("One or more passive hostname sources are not supported.")
     if not selected:
@@ -898,12 +899,99 @@ def normalize_domain_sources(value) -> tuple[str, ...]:
     return selected
 
 
+def get_commoncrawl_hosts(domain: str) -> dict:
+    collections = fetch_json("https://index.commoncrawl.org/collinfo.json", expected_host="index.commoncrawl.org")
+    if not isinstance(collections, list):
+        raise LookupError("Common Crawl returned an unexpected collection list.")
+    available = []
+    for item in collections:
+        if not isinstance(item, dict):
+            continue
+        collection_id = item.get("id")
+        match = re.fullmatch(r"CC-MAIN-(\d{4})-(\d{2})", str(collection_id or ""))
+        if match:
+            available.append(((int(match.group(1)), int(match.group(2))), collection_id))
+    if not available:
+        raise LookupError("Common Crawl did not list a current URL index.")
+    collection_id = max(available)[1]
+    params = urlencode({
+        "url": domain,
+        "matchType": "domain",
+        "filter": ["status:200", "mime:text/html"],
+        "fields": "url,timestamp",
+        "output": "json",
+        "collapse": "urlkey",
+        "limit": 1000,
+    }, doseq=True)
+    source_url = f"https://index.commoncrawl.org/{collection_id}-index?{params}"
+    status_code, body = fetch_text(source_url, expected_host="index.commoncrawl.org", maximum=1_000_000, timeout=20)
+    if status_code != 200:
+        if status_code == 429:
+            raise LookupError("Common Crawl rate-limited this request. Try again later.")
+        raise LookupError(f"Common Crawl returned HTTP {status_code}.")
+    suffix = "." + domain
+    hosts = {}
+    invalid_records = 0
+    lines = [line for line in body.splitlines() if line.strip()]
+    for line in lines[:1000]:
+        try:
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                invalid_records += 1
+                continue
+            parsed = urlsplit(str(record.get("url", "")))
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                invalid_records += 1
+                continue
+            host = normalize_domain(parsed.hostname)
+        except (json.JSONDecodeError, LookupError, ValueError):
+            invalid_records += 1
+            continue
+        if host == domain or not host.endswith(suffix):
+            continue
+        timestamp = str(record.get("timestamp", ""))
+        if not re.fullmatch(r"\d{14}", timestamp):
+            timestamp = ""
+        elif timestamp:
+            try:
+                datetime.strptime(timestamp, "%Y%m%d%H%M%S")
+            except ValueError:
+                timestamp = ""
+        current = hosts.get(host)
+        if current is None or timestamp > current:
+            hosts[host] = timestamp
+    rows = [
+        {"name": host, "lastArchived": datetime.strptime(timestamp, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z") if timestamp else None}
+        for host, timestamp in sorted(hosts.items())
+    ]
+    return {
+        "source": source_url,
+        "archive": collection_id,
+        "queriedAt": now_iso(),
+        "hosts": rows[:1000],
+        "truncated": len(lines) >= 1000 or len(rows) > 1000,
+        "invalidRecords": invalid_records,
+    }
+
+
 def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str, ...] = DOMAIN_SOURCE_DEFAULTS) -> dict:
     selected = set(domain_sources)
-    hostsearch = run_module(get_hackertarget_hosts, domain) if "hackertarget" in selected else {
-        "status": "skipped", "source": "https://api.hackertarget.com/hostsearch/", "hosts": [],
+    provider_results = {
+        "hackertarget": {"status": "skipped", "source": "https://api.hackertarget.com/hostsearch/", "hosts": []},
+        "commoncrawl": {"status": "skipped", "source": "https://index.commoncrawl.org/", "hosts": []},
     }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        provider_jobs = {}
+        if "hackertarget" in selected:
+            provider_jobs["hackertarget"] = pool.submit(run_module, get_hackertarget_hosts, domain)
+        if "commoncrawl" in selected:
+            provider_jobs["commoncrawl"] = pool.submit(run_module, get_commoncrawl_hosts, domain)
+        for source_id, future in provider_jobs.items():
+            provider_results[source_id] = future.result()
+    hostsearch = provider_results["hackertarget"]
+    commoncrawl = provider_results["commoncrawl"]
     findings: dict[str, set[str]] = {}
+    archive_dates: dict[str, dict[str, str]] = {}
     if "crtsh" in selected and certificates.get("status") == "ok":
         for item in certificates.get("names", []):
             if not item.get("wildcard"):
@@ -911,6 +999,11 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
     if "hackertarget" in selected and hostsearch.get("status") == "ok":
         for item in hostsearch.get("hosts", []):
             findings.setdefault(item["name"], set()).add("HackerTarget")
+    if "commoncrawl" in selected and commoncrawl.get("status") == "ok":
+        for item in commoncrawl.get("hosts", []):
+            findings.setdefault(item["name"], set()).add("Common Crawl")
+            if item.get("lastArchived"):
+                archive_dates.setdefault(item["name"], {})["Common Crawl"] = item["lastArchived"]
     findings.pop(domain, None)
     hostnames = sorted(findings)
     unresolved = hostnames[:25]
@@ -927,6 +1020,7 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
         {
             "name": host,
             "sources": sorted(findings[host]),
+            "archiveDates": archive_dates.get(host, {}),
             "addresses": resolved.get(host, {}).get("addresses", []),
             "resolutionAttempted": host in resolved,
             "resolutionStatus": resolved.get(host, {}).get("resolutionStatus"),
@@ -945,6 +1039,12 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
             "count": len(hostsearch.get("hosts", [])), "source": hostsearch.get("source"),
             "error": hostsearch.get("error"), "truncated": bool(hostsearch.get("truncated")),
         },
+        {
+            "id": "commoncrawl", "name": "Common Crawl URL Index", "status": commoncrawl.get("status"),
+            "count": len(commoncrawl.get("hosts", [])), "source": commoncrawl.get("source"),
+            "error": commoncrawl.get("error"), "truncated": bool(commoncrawl.get("truncated")),
+            "archive": commoncrawl.get("archive"), "invalidRecords": commoncrawl.get("invalidRecords", 0),
+        },
     ]
     selected_providers = [provider for provider in providers if provider["id"] in selected]
     successful_providers = [provider for provider in selected_providers if provider["status"] == "ok"]
@@ -958,7 +1058,7 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
         "hosts": hosts[:500],
         "totalFound": len(hostnames),
         "resolvedCount": sum(bool(item["addresses"]) for item in hosts),
-        "truncated": len(hostnames) > 500 or bool(hostsearch.get("truncated")) or bool(certificates.get("truncated")),
+        "truncated": len(hostnames) > 500 or bool(hostsearch.get("truncated")) or bool(certificates.get("truncated")) or bool(commoncrawl.get("truncated")),
         "resolutionLimit": 25,
         "providers": providers,
         "selectedSources": sorted(selected),
