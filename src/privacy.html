@@ -63,14 +63,14 @@
         </section>
         <section>
           <h2>4. Who receives information</h2>
-          <p>Lookup values are sent only to the source services needed for the lookup you start, plus a provider you explicitly choose for an external search. Depending on the feature, these can include Cloudflare DNS over HTTPS, an IANA-selected RDAP registry, crt.sh, HackerTarget, public profile websites in the selected account-check catalog, and the external search providers listed above. GitHub receives a request to download the public profile-check definitions when needed; the username is sent to the profile sites, not with that catalog request.</p>
+          <p>Lookup values are sent only to the source services needed for the lookup you start, plus a provider you explicitly choose for an external search. For domain cases, you can choose whether the hostname is sent to crt.sh, HackerTarget, or both; DNS and RDAP checks still run. Depending on the feature, other services can include Cloudflare DNS over HTTPS, an IANA-selected RDAP registry, public profile websites in the selected account-check catalog, and the external search providers listed above. GitHub receives a request to download the public profile-check definitions when needed; the username is sent to the profile sites, not with that catalog request.</p>
           <p>These services are independent of the Operator. Their systems may receive the query and ordinary connection information, such as your public IP address, request time, and technical request details. Their own privacy notices and retention rules apply. The Operator cannot control how a provider handles information after it receives a request.</p>
           <p>Case data is not sent to an Operator database by the current local version. The local Python service suppresses access logs containing request targets and query values and does not keep an application database. Network lookups still leave your device for the selected public sources.</p>
         </section>
         <section>
           <h2>5. Storage and retention</h2>
           <ul>
-            <li><strong>Browser cases:</strong> remain in local storage until you delete the case, clear all saved cases, or clear site data. The App does not set a separate automatic deletion period.</li>
+            <li><strong>Browser cases:</strong> cases include your selected domain sources and retain up to five prior compact summaries and provider-specific hostname snapshots for comparison. They remain in local storage until you delete the case, clear all saved cases, or clear site data. The App does not set a separate automatic deletion period.</li>
             <li><strong>Exports:</strong> remain wherever you save them and are under your control.</li>
             <li><strong>Lookup processing:</strong> the local service handles requests while they run and does not maintain a case database or log query values. Provider-side retention is determined by each provider.</li>
             <li><strong>Metadata inspection:</strong> the file is parsed in memory by the local service and is not saved by the App; the result remains in page memory until the page is refreshed or closed.</li>

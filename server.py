@@ -881,14 +881,34 @@ def lookup_host_addresses(host: str) -> dict:
     }
 
 
-def get_subdomain_map(domain: str, certificates: dict) -> dict:
-    hostsearch = run_module(get_hackertarget_hosts, domain)
+DOMAIN_SOURCE_DEFAULTS = ("crtsh", "hackertarget")
+
+
+def normalize_domain_sources(value) -> tuple[str, ...]:
+    if value is None:
+        return DOMAIN_SOURCE_DEFAULTS
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise LookupError("Choose one or more supported passive hostname sources.")
+    selected = tuple(dict.fromkeys(value))
+    unknown = set(selected) - set(DOMAIN_SOURCE_DEFAULTS)
+    if unknown:
+        raise LookupError("One or more passive hostname sources are not supported.")
+    if not selected:
+        raise LookupError("Select at least one passive hostname source.")
+    return selected
+
+
+def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str, ...] = DOMAIN_SOURCE_DEFAULTS) -> dict:
+    selected = set(domain_sources)
+    hostsearch = run_module(get_hackertarget_hosts, domain) if "hackertarget" in selected else {
+        "status": "skipped", "source": "https://api.hackertarget.com/hostsearch/", "hosts": [],
+    }
     findings: dict[str, set[str]] = {}
-    if certificates.get("status") == "ok":
+    if "crtsh" in selected and certificates.get("status") == "ok":
         for item in certificates.get("names", []):
             if not item.get("wildcard"):
                 findings.setdefault(item["name"], set()).add("crt.sh")
-    if hostsearch.get("status") == "ok":
+    if "hackertarget" in selected and hostsearch.get("status") == "ok":
         for item in hostsearch.get("hosts", []):
             findings.setdefault(item["name"], set()).add("HackerTarget")
     findings.pop(domain, None)
@@ -914,13 +934,25 @@ def get_subdomain_map(domain: str, certificates: dict) -> dict:
         }
         for host in hostnames
     ]
-    providers = []
-    if certificates:
-        providers.append({"name": "Certificate transparency", "status": certificates.get("status"), "count": len(certificates.get("names", [])), "source": certificates.get("source")})
-    providers.append({"name": "HackerTarget Host Search", "status": hostsearch.get("status"), "count": len(hostsearch.get("hosts", [])), "source": hostsearch.get("source"), "error": hostsearch.get("error")})
-    any_source_ok = any(item["status"] == "ok" for item in providers)
+    providers = [
+        {
+            "id": "crtsh", "name": "Certificate transparency", "status": certificates.get("status"),
+            "count": len(certificates.get("names", [])), "source": certificates.get("source"),
+            "error": certificates.get("error"), "truncated": bool(certificates.get("truncated")),
+        },
+        {
+            "id": "hackertarget", "name": "HackerTarget Host Search", "status": hostsearch.get("status"),
+            "count": len(hostsearch.get("hosts", [])), "source": hostsearch.get("source"),
+            "error": hostsearch.get("error"), "truncated": bool(hostsearch.get("truncated")),
+        },
+    ]
+    selected_providers = [provider for provider in providers if provider["id"] in selected]
+    successful_providers = [provider for provider in selected_providers if provider["status"] == "ok"]
+    failed_providers = [provider for provider in selected_providers if provider["status"] == "error"]
+    any_source_ok = bool(successful_providers)
+    overall_status = "error" if not any_source_ok else "partial" if failed_providers else "ok"
     return {
-        "status": "ok" if any_source_ok else "error",
+        "status": overall_status,
         "source": "https://api.hackertarget.com/hostsearch/",
         "queriedAt": now_iso(),
         "hosts": hosts[:500],
@@ -929,7 +961,8 @@ def get_subdomain_map(domain: str, certificates: dict) -> dict:
         "truncated": len(hostnames) > 500 or bool(hostsearch.get("truncated")) or bool(certificates.get("truncated")),
         "resolutionLimit": 25,
         "providers": providers,
-        "error": None if any_source_ok else "No passive hostname source returned data.",
+        "selectedSources": sorted(selected),
+        "error": None if any_source_ok else "No selected passive hostname source returned data.",
     }
 
 
@@ -1107,7 +1140,7 @@ def inspect_metadata(payload: dict) -> dict:
     }
 
 
-def investigate(value: str, authorized: bool = False, category: str = "all", limit: int = 25) -> dict:
+def investigate(value: str, authorized: bool = False, category: str = "all", limit: int = 25, domain_sources=None) -> dict:
     entity = identify(value)
     modules = {}
     if entity["type"] in {"username", "email", "phone"} and not authorized:
@@ -1133,15 +1166,19 @@ def investigate(value: str, authorized: bool = False, category: str = "all", lim
             for name, future in jobs.items():
                 modules[name] = future.result()
     elif entity["type"] == "domain":
+        selected_sources = normalize_domain_sources(domain_sources)
         with ThreadPoolExecutor(max_workers=3) as pool:
             jobs = {
                 "dns": pool.submit(run_module, get_dns, entity["value"]),
-                "certificates": pool.submit(run_module, get_certificates, entity["value"]),
                 "registration": pool.submit(run_module, get_registration, entity),
             }
+            if "crtsh" in selected_sources:
+                jobs["certificates"] = pool.submit(run_module, get_certificates, entity["value"])
             for name, future in jobs.items():
                 modules[name] = future.result()
-        modules["subdomains"] = run_module(get_subdomain_map, entity["value"], modules["certificates"])
+        if "certificates" not in modules:
+            modules["certificates"] = {"status": "skipped", "error": "Not selected for this collection."}
+        modules["subdomains"] = run_module(get_subdomain_map, entity["value"], modules["certificates"], selected_sources)
     else:
         modules["registration"] = run_module(get_registration, entity)
     return {"entity": entity, "generatedAt": now_iso(), "modules": modules}
@@ -1298,7 +1335,10 @@ class Handler(BaseHTTPRequestHandler):
                 limit = payload.get("limit", 25)
                 if not isinstance(category, str) or not isinstance(limit, int) or isinstance(limit, bool):
                     raise LookupError("Invalid account footprint options.")
-                result = investigate(payload["query"], payload.get("authorized") is True, category, max(1, min(limit, 40)))
+                result = investigate(
+                    payload["query"], payload.get("authorized") is True, category,
+                    max(1, min(limit, 40)), payload.get("domainSources"),
+                )
             else:
                 result = inspect_metadata(payload)
         except (UnicodeDecodeError, json.JSONDecodeError):

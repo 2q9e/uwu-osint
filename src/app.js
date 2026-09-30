@@ -1,5 +1,6 @@
 const STORAGE_KEY = "uwu-osint-cases-v1";
 const ROOT = document.querySelector("#app");
+const DEFAULT_DOMAIN_SOURCES = ["crtsh", "hackertarget"];
 
 function readCases() {
   try {
@@ -71,8 +72,8 @@ function countDns(dns) {
 }
 
 function statusBadge(module, label) {
-  const status = module?.status === "ok" ? "available" : module?.status === "partial" ? "partial" : "unavailable";
-  const text = module?.status === "ok" ? label : module?.status === "partial" ? "Partial" : "Unavailable";
+  const status = module?.status === "ok" ? "available" : module?.status === "partial" ? "partial" : module?.status === "skipped" ? "skipped" : "unavailable";
+  const text = module?.status === "ok" ? label : module?.status === "partial" ? "Partial" : module?.status === "skipped" ? "Skipped" : "Unavailable";
   return `<span class="status-badge ${status}"><i></i>${esc(text)}</span>`;
 }
 
@@ -162,11 +163,11 @@ function overviewContent(record) {
       </article>
       <article class="panel overview-panel">
         <div class="panel-heading"><div><span class="eyebrow">02 / CERTIFICATE LOGS</span><h3>Observed names</h3></div>${domain ? `<button class="text-button" data-tab="certificates">View details <span>→</span></button>` : ""}</div>
-        ${domain ? (modules.certificates?.status === "ok" ? `<div class="summary-number">${certCount}<span> certificate name${certCount === 1 ? "" : "s"}</span></div><div class="subtle-note">Names in public certificate transparency records.</div>` : `<div class="inline-error">${esc(modules.certificates?.error || "Certificate lookup was not available.")}</div>`) : `<div class="subtle-note">Certificate discovery is available for domain cases.</div>`}
+        ${domain ? (modules.certificates?.status === "ok" ? `<div class="summary-number">${certCount}<span> certificate name${certCount === 1 ? "" : "s"}</span></div><div class="subtle-note">Names in public certificate transparency records.</div>` : modules.certificates?.status === "skipped" ? `<div class="subtle-note">Not selected for this collection.</div>` : `<div class="inline-error">${esc(modules.certificates?.error || "Certificate lookup was not available.")}</div>`) : `<div class="subtle-note">Certificate discovery is available for domain cases.</div>`}
       </article>
       ${domain ? `<article class="panel overview-panel">
         <div class="panel-heading"><div><span class="eyebrow">03 / PASSIVE HOST DISCOVERY</span><h3>Subdomain map</h3></div><button class="text-button" data-tab="subdomains">View map <span>→</span></button></div>
-        ${modules.subdomains?.status === "ok" ? `<div class="summary-number">${hostCount}<span> scoped host${hostCount === 1 ? "" : "s"}</span></div><div class="subtle-note">${esc(modules.subdomains.resolvedCount ?? 0)} hosts resolved to public addresses.</div>` : `<div class="inline-error">${esc(modules.subdomains?.error || "No passive host data returned.")}</div>`}
+        ${modules.subdomains?.status === "ok" || modules.subdomains?.status === "partial" ? `<div class="summary-number">${hostCount}<span> scoped host${hostCount === 1 ? "" : "s"}</span></div><div class="subtle-note">${esc(modules.subdomains.resolvedCount ?? 0)} hosts resolved to public addresses.${modules.subdomains.status === "partial" ? " One or more selected sources failed." : ""}</div>` : `<div class="inline-error">${esc(modules.subdomains?.error || "No passive host data returned.")}</div>`}
       </article>` : ""}
       <article class="panel overview-panel registration-panel">
         <div class="panel-heading"><div><span class="eyebrow">${domain ? "04" : "03"} / REGISTRY RECORD</span><h3>Registration</h3></div>${registration?.source ? safeLink(registration.source, "RDAP record") : ""}</div>
@@ -281,7 +282,7 @@ function notesPanel(record) {
   return `<section class="panel notes-panel"><div class="panel-heading"><div><span class="eyebrow">CASE NOTEBOOK</span><h3>Working notes</h3></div><span class="saved-label" data-notes-saved>Saved in this browser</span></div><textarea data-notes aria-label="Case notes" placeholder="Add context, hypotheses, or follow-up questions. These notes stay in local browser storage." rows="3">${esc(record.notes || "")}</textarea></section>`;
 }
 
-function disclosureText(value, fallbackEntity = {}) {
+function disclosureText(value, fallbackEntity = {}, domainSources = DEFAULT_DOMAIN_SOURCES) {
   const raw = String(value || "").trim();
   const query = raw.toLowerCase();
   const type = fallbackEntity.type;
@@ -303,12 +304,34 @@ function disclosureText(value, fallbackEntity = {}) {
   if (query.startsWith("phone:") || raw.startsWith("+")) return "Phone format is checked locally; no phone number is sent to a lookup provider. The full number, case, and notes are stored in this browser until deleted.";
   if (/^as\d{1,10}$/i.test(raw) || type === "asn") return `The ASN (${raw}) is sent to the applicable public RDAP registry. The case and results are stored in this browser.`;
   if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(raw) || (raw.includes(":") && !/^https?:\/\//i.test(raw))) return `The public IP value (${raw}) is sent to an IANA-selected RDAP registry. Its reverse-DNS name is sent to Cloudflare DNS. The case and results are stored in this browser.`;
-  if (/^(?:https?:\/\/)?[^\s/]+\.[a-z]{2,}(?:\/.*)?$/i.test(raw) || type === "domain") return `The hostname is sent to Cloudflare DNS, IANA RDAP/bootstrap, crt.sh certificate search, and HackerTarget passive host search. URL paths are ignored by the built-in lookup. Discovered hostnames are resolved with Cloudflare DNS. The case and results are stored in this browser.`;
+  if (/^(?:https?:\/\/)?[^\s/]+\.[a-z]{2,}(?:\/.*)?$/i.test(raw) || type === "domain") {
+    const passiveSources = [];
+    if (domainSources.includes("crtsh")) passiveSources.push("crt.sh certificate search");
+    if (domainSources.includes("hackertarget")) passiveSources.push("HackerTarget passive host search");
+    const selected = passiveSources.length ? `the selected passive sources (${passiveSources.join(" and ")})` : "no passive hostname source";
+    return `The hostname is sent to Cloudflare DNS, IANA RDAP/bootstrap, and ${selected}. URL paths are ignored by the built-in lookup. Discovered hostnames are resolved with Cloudflare DNS. The case and results are stored in this browser.`;
+  }
   return "The app validates the subject before sending requests. Public-source queries are limited to the value and providers needed for the selected lookup; submitted cases, results, and notes are stored in this browser until deleted.";
 }
 
+function likelyDomainLookup(value) {
+  const raw = String(value || "").trim();
+  if (!raw || /^(?:@|username:|email:|email-domain:|phone:|as\d+)/i.test(raw) || /^[^\s@]+@[^\s@]+$/.test(raw)) return false;
+  let host = raw;
+  if (/^https?:\/\//i.test(raw)) {
+    try { host = new URL(raw).hostname; } catch { return false; }
+  } else {
+    host = raw.split("/", 1)[0].replace(/:\d+$/, "");
+  }
+  if (!host.includes(".") || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) return false;
+  const finalLabel = host.replace(/\.$/, "").split(".").at(-1) || "";
+  return /^[a-z]{2,}$/i.test(finalLabel);
+}
+
 function privacyDisclosure(record, query = "") {
-  const text = disclosureText(query || record?.query || "", record?.result?.entity || {});
+  const savedSources = record?.collectionOptions?.domainSources;
+  const domainSources = Array.isArray(savedSources) ? savedSources : DEFAULT_DOMAIN_SOURCES;
+  const text = disclosureText(query || record?.query || "", record?.result?.entity || {}, domainSources);
   const isUsername = /^(?:@|username:)/i.test(String(query || record?.query || "").trim());
   return `<section class="privacy-disclosure" aria-label="Lookup data flow"><p class="privacy-preview" id="privacy-preview">${esc(text)}</p><div class="profile-preview" id="profile-preview" ${isUsername ? "" : "hidden"}><b>Profile sites planned for this lookup</b><ul><li>Loading the public profile list…</li></ul><small data-catalog-revision></small><small data-catalog-stale hidden>The catalog request failed; cached pinned rules are being used.</small></div><details><summary>What gets queried and stored?</summary><p>External shortcuts send a query only after you choose a provider and confirm authorization. Provider services may log requests under their own policies. Cases and notes remain in local browser storage until deleted or site data is cleared.</p></details></section>`;
 }
@@ -337,6 +360,7 @@ function recordTypeName(type) {
 function certificatesContent(record) {
   const module = record.result.modules?.certificates;
   if (!module) return `<div class="empty-panel"><span class="empty-glyph">▤</span><h3>No certificate collection</h3><p>Certificate transparency lookup is available for domain cases.</p></div>`;
+  if (module.status === "skipped") return `<div class="empty-panel"><span class="empty-glyph">▤</span><h3>Source not selected</h3><p>Certificate transparency was not queried for this collection. Select it in the collection options above and refresh the case to include it.</p></div>`;
   if (module.status !== "ok") return `<div class="empty-panel"><span class="empty-glyph">▤</span><h3>Certificate data unavailable</h3><p>${esc(module.error)}</p>${safeLink("https://crt.sh/", "Open crt.sh")}</div>`;
   const names = module.names ?? [];
   return `<div class="tab-intro"><div><span class="eyebrow">PUBLIC CERTIFICATE TRANSPARENCY</span><h2>Observed names</h2><p>${names.length} distinct name${names.length === 1 ? "" : "s"} · checked ${esc(shortDate(module.queriedAt))}</p></div>${safeLink(module.source, "Open source query")}</div>
@@ -586,9 +610,10 @@ function relationshipGraphContent(record) {
 function subdomainsContent(record) {
   const module = record.result.modules?.subdomains;
   if (!module) return `<div class="empty-panel"><span class="empty-glyph">⌘</span><h3>No host discovery run</h3><p>Passive hostname discovery is available for domain cases.</p></div>`;
-  if (module.status !== "ok") return `<div class="empty-panel"><span class="empty-glyph">⌘</span><h3>Host discovery unavailable</h3><p>${esc(module.error || "No public source returned results.")}</p></div>`;
+  if (module.status === "error") return `<div class="empty-panel"><span class="empty-glyph">⌘</span><h3>Host discovery unavailable</h3><p>${esc(module.error || "No public source returned results.")}</p>${(module.providers || []).map((provider) => `<div class="notice warning-notice">${esc(provider.name)}: ${esc(provider.error || "Source unavailable.")}</div>`).join("")}</div>`;
   const hosts = module.hosts || [];
   return `<div class="tab-intro"><div><span class="eyebrow">PASSIVE DOMAIN FOOTPRINT</span><h2>Subdomain map</h2><p>${esc(module.totalFound ?? hosts.length)} scoped hosts · checked ${esc(shortDate(module.queriedAt))}</p></div></div>
+    ${module.status === "partial" ? `<div class="notice warning-notice">Some selected sources did not return data. Results from successful sources remain available below.</div>` : ""}
     ${module.truncated ? `<div class="notice">At least one public source was capped, or more than 500 names were found. This case may contain a partial result set.</div>` : ""}
     <section class="panel graph-panel"><div class="panel-heading"><div><span class="eyebrow">CORRELATED HOSTS</span><h3>${esc(record.result.entity?.value)}</h3></div><span class="panel-caption">First 18 hosts shown in graph</span></div>${networkGraph(module, record.result.entity?.value)}</section>
     <div class="panel table-panel host-table"><table><thead><tr><th>Hostname</th><th>Public addresses</th><th>Sources</th></tr></thead><tbody>${hosts.map((host) => `<tr><td><code>${esc(host.name)}</code></td><td>${host.addresses?.length ? host.addresses.map((address) => `<code>${esc(address)}</code>`).join("<br />") : `<span class="muted" title="${esc((host.resolutionErrors || []).join(" · "))}">${host.resolutionAttempted ? host.resolutionStatus === "error" ? "Lookup failed" : host.resolutionStatus === "partial" ? "Partial DNS error" : "No public address returned" : "Not checked (limit 25)"}</span>`}</td><td>${(host.sources || []).map((source) => `<span class="tag">${esc(source)}</span>`).join(" ")}</td></tr>`).join("") || `<tr><td colspan="3">No hostnames returned.</td></tr>`}</tbody></table></div>
@@ -856,7 +881,11 @@ function updateAccountPreview() {
 
 function updatePrivacyPreview(value) {
   const preview = document.querySelector("#privacy-preview");
-  if (preview) preview.textContent = disclosureText(value, currentCase()?.result?.entity || {});
+  const checkedSources = [...document.querySelectorAll('input[name="domainSource"]:checked')].map((input) => input.value);
+  const previewSources = document.querySelector("#domain-source-options")
+    ? checkedSources
+    : currentCase()?.collectionOptions?.domainSources || DEFAULT_DOMAIN_SOURCES;
+  if (preview) preview.textContent = disclosureText(value, currentCase()?.result?.entity || {}, previewSources);
   const profilePreview = document.querySelector("#profile-preview");
   if (profilePreview) {
     profilePreview.hidden = !/^(?:@|username:)/i.test(String(value || "").trim());
@@ -883,15 +912,67 @@ function summarizeResult(result) {
   return { generatedAt: result?.generatedAt || new Date().toISOString(), metrics };
 }
 
+function captureEvidenceSnapshot(result) {
+  const modules = result?.modules || {};
+  const evidence = new Map();
+  const add = (type, value, source) => {
+    if (!value || !source) return;
+    const item = { type, value: String(value), source };
+    evidence.set(`${type}\u0000${item.value.toLowerCase()}\u0000${source}`, item);
+  };
+  const certificateModule = modules.certificates || {};
+  const hostModule = modules.subdomains || {};
+  const hostProviders = hostModule.providers || [];
+  const certificateProvider = hostProviders.find((item) => item.id === "crtsh");
+  const hostSearchProvider = hostProviders.find((item) => item.id === "hackertarget");
+  const sources = {
+    "crt.sh": {
+      status: certificateModule.status || certificateProvider?.status || "unknown",
+      complete: certificateModule.status === "ok" && !certificateModule.truncated,
+    },
+    HackerTarget: {
+      status: hostSearchProvider?.status || "unknown",
+      complete: hostSearchProvider?.status === "ok" && !hostSearchProvider?.truncated && !hostModule.truncated,
+    },
+  };
+  for (const certificate of certificateModule.names || []) add("Hostname", certificate.name, "crt.sh");
+  for (const host of hostModule.hosts || []) {
+    if ((host.sources || []).includes("HackerTarget")) add("Hostname", host.name, "HackerTarget");
+  }
+  const allEvidence = [...evidence.values()].sort((a, b) => a.source.localeCompare(b.source) || a.value.localeCompare(b.value));
+  const limit = 2500;
+  return {
+    generatedAt: result?.generatedAt || new Date().toISOString(),
+    evidence: allEvidence.slice(0, limit),
+    sources,
+    truncated: allEvidence.length > limit,
+  };
+}
+
 function historyContent(record) {
   const history = Array.isArray(record.history) ? record.history : [];
   if (!history.length) return `<div class="empty-panel compact-empty"><h3>No earlier collection yet</h3><p>Refresh this case to save a compact summary and compare module counts with the previous run.</p></div>`;
   const latest = history[0];
   const current = summarizeResult(record.result);
   const keys = [...new Set([...Object.keys(latest.metrics || {}), ...Object.keys(current.metrics || {})])];
+  const priorEvidence = latest.evidenceSnapshot;
+  const currentEvidence = captureEvidenceSnapshot(record.result);
+  const comparableSources = Object.keys(currentEvidence.sources).filter((source) =>
+    priorEvidence?.sources?.[source]?.status === "ok" && priorEvidence.sources[source].complete === true
+    && currentEvidence.sources[source].status === "ok" && currentEvidence.sources[source].complete === true
+    && !priorEvidence.truncated && !currentEvidence.truncated);
+  const evidenceKey = (item) => `${item.type}\u0000${String(item.value).toLowerCase()}\u0000${item.source}`;
+  const priorKeys = new Set((priorEvidence?.evidence || []).map(evidenceKey));
+  const currentKeys = new Set(currentEvidence.evidence.map(evidenceKey));
+  const newlyObserved = currentEvidence.evidence.filter((item) => comparableSources.includes(item.source) && !priorKeys.has(evidenceKey(item)));
+  const notReturned = (priorEvidence?.evidence || []).filter((item) => comparableSources.includes(item.source) && !currentKeys.has(evidenceKey(item)));
+  const changeList = (items) => items.length
+    ? `<ul class="evidence-delta-list">${items.slice(0, 30).map((item) => `<li><span class="tag">${esc(item.source)}</span><code>${esc(item.value)}</code></li>`).join("")}</ul>${items.length > 30 ? `<p class="import-footnote">${items.length - 30} more observation${items.length - 30 === 1 ? "" : "s"} not shown.</p>` : ""}`
+    : `<p class="subtle-note">No comparable observations in this category.</p>`;
   return `<div class="tab-intro"><div><span class="eyebrow">REFRESH COMPARISON</span><h2>Collection history</h2><p>Latest saved snapshot ${esc(shortDate(latest.generatedAt))} · ${history.length} of 5 summaries retained</p></div></div>
-    <div class="notice">This view compares compact module summaries. It does not retain old raw records or prove why a source changed.</div>
+    <div class="notice">Provider-level hostname changes compare only sources that succeeded in both runs with untruncated results. “Not returned” describes a changed result set; it does not prove a hostname was removed.</div>
     <div class="panel table-panel"><table><thead><tr><th>Module summary</th><th>Previous run</th><th>Current run</th></tr></thead><tbody>${keys.map((key) => `<tr><td>${esc(key)}</td><td>${esc(latest.metrics?.[key] ?? "—")}</td><td>${esc(current.metrics?.[key] ?? "—")}</td></tr>`).join("") || `<tr><td colspan="3">No comparable module summaries.</td></tr>`}</tbody></table></div>
+    ${priorEvidence ? `<div class="history-delta-grid"><section class="panel history-delta-panel"><div class="panel-heading"><div><span class="eyebrow">SAME-SOURCE DIFF</span><h3>New observations</h3></div><span class="count-tag">${newlyObserved.length}</span></div>${changeList(newlyObserved)}</section><section class="panel history-delta-panel"><div class="panel-heading"><div><span class="eyebrow">SAME-SOURCE DIFF</span><h3>Not returned this run</h3></div><span class="count-tag">${notReturned.length}</span></div>${changeList(notReturned)}</section></div>` : `<div class="empty-panel compact-empty"><h3>Detailed comparisons start with the next refresh</h3><p>Older saved snapshots contain module counts only. Refresh this case to start tracking provider-specific hostname observations.</p></div>`}
     ${history.length > 1 ? `<section class="panel history-list"><div class="panel-heading"><div><span class="eyebrow">OLDER RUNS</span><h3>Recent snapshots</h3></div></div>${history.slice(1).map((snapshot, index) => `<div class="history-item"><b>Run ${index + 2}</b><time>${esc(shortDate(snapshot.generatedAt))}</time><span>${esc(Object.entries(snapshot.metrics || {}).map(([key, value]) => `${key}: ${value}`).join(" · ") || "No summary")}</span></div>`).join("")}</section>` : ""}`;
 }
 
@@ -920,6 +1001,10 @@ function render() {
     : sensitiveCase && !state.revealSensitive ? ""
       : record?.query || "";
   const privacyQuery = initialQuery || record?.query || "";
+  const savedDomainSources = Array.isArray(record?.collectionOptions?.domainSources)
+    ? record.collectionOptions.domainSources
+    : DEFAULT_DOMAIN_SOURCES;
+  const showDomainSources = record?.result?.entity?.type === "domain" || likelyDomainLookup(privacyQuery);
   ROOT.innerHTML = `
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <div class="app-shell">
@@ -938,7 +1023,7 @@ function render() {
         <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>${!inTools && phone ? "LOCAL FORMAT CHECK" : !inTools && email ? "DOMAIN-ONLY SOURCE QUERIES" : "PUBLIC SOURCE QUERIES"}</span><div class="mobile-case-tools">${!inTools && state.cases.length ? `<label class="sr-only" for="mobile-case-select">Switch saved case</label><select id="mobile-case-select"><option value="" ${record ? "" : "selected"}>New case</option>${state.cases.map((item) => `<option value="${esc(item.id)}" ${item.id === record?.id ? "selected" : ""}>${esc(caseSubjectLabel(item))}</option>`).join("")}</select>` : ""}<button data-action="new-case">＋ New</button>${state.cases.length ? `<button class="mobile-clear-cases" data-action="clear-cases" aria-label="Clear all saved cases" title="Clear all saved cases">Clear</button>` : ""}</div>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
         <div class="content-wrap">
           <section class="page-heading"><div><span class="eyebrow">${inTools ? "NATIVE RESEARCH MODULES" : `INTELLIGENCE / ${record ? esc(record.result.entity?.type?.toUpperCase()) : "START HERE"}`}</span><h1>${inTools ? `Research <em>modules.</em>` : `Public surface <em>research.</em>`}</h1><p>${inTools ? "Built-in collection, local file inspection, and report interchange." : "Research public infrastructure, self-audit accounts, check an email domain without storing a mailbox, and validate phone format locally."}</p></div><div class="heading-ornament"><div class="ornament-ring ring-one"></div><div class="ornament-ring ring-two"></div><div class="ornament-core">uwu</div></div></section>
-          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(initialQuery)}" placeholder="Domain · IP · ASN · @username · email · email-domain:example.com · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email · email-domain:example.com · E.164 phone format</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>${privacyDisclosure(record, privacyQuery)}`}
+          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(initialQuery)}" placeholder="Domain · IP · ASN · @username · email · email-domain:example.com · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email · email-domain:example.com · E.164 phone format</div><div class="domain-source-options" id="domain-source-options" ${showDomainSources ? "" : "hidden"}><span class="domain-source-heading">PASSIVE HOST SOURCES</span><label><input type="checkbox" name="domainSource" value="crtsh" ${savedDomainSources.includes("crtsh") ? "checked" : ""} ${state.busy ? "disabled" : ""} /><span><b>Certificate transparency</b><small>Names in public certificate logs</small></span></label><label><input type="checkbox" name="domainSource" value="hackertarget" ${savedDomainSources.includes("hackertarget") ? "checked" : ""} ${state.busy ? "disabled" : ""} /><span><b>HackerTarget Host Search</b><small>Passive hostname and address results</small></span></label><p>Choose which providers receive the domain. DNS and registration checks remain part of domain collection.</p></div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>${privacyDisclosure(record, privacyQuery)}`}
           ${inTools ? "" : flashMessage()}
           ${inTools ? toolsDirectory() : record ? `
             <section class="case-title-row"><div><div class="subject-line"><span class="subject-dot"></span><h2>${esc(subjectDisplayLabel(record))}</h2><span class="type-tag">${esc(record.result.entity?.type || "subject")}</span>${sensitiveCase ? `<button class="text-button reveal-subject-button" data-action="toggle-sensitive" aria-pressed="${state.revealSensitive}">${state.revealSensitive ? "Hide subject" : "Reveal subject"}</button>` : ""}</div><p>Case opened ${esc(shortDate(record.createdAt))} <span class="middle-dot">·</span> Latest collection ${esc(shortDate(record.result.generatedAt || record.updatedAt))}</p></div><button class="delete-button" data-action="delete-case">Delete case <span>×</span></button></section>
@@ -992,7 +1077,7 @@ async function populateAccountCategories(category = state.accountCategory) {
   }
 }
 
-async function investigate(query, authorized, category = "all", existingCaseId = null) {
+async function investigate(query, authorized, category = "all", existingCaseId = null, domainSources = null) {
   state.revealSensitive = false;
   state.busy = true;
   state.flash = "";
@@ -1001,7 +1086,7 @@ async function investigate(query, authorized, category = "all", existingCaseId =
     const response = await fetch("/api/investigate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, authorized, category, limit: 25 }),
+      body: JSON.stringify({ query, authorized, category, limit: 25, domainSources }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "The lookup could not be completed.");
@@ -1017,13 +1102,18 @@ async function investigate(query, authorized, category = "all", existingCaseId =
     if (record) {
       const savedImports = record.result.modules?.imports || [];
       if (!Array.isArray(record.history)) record.history = [];
-      record.history.unshift(summarizeResult(record.result));
+      const previousSnapshot = summarizeResult(record.result);
+      previousSnapshot.evidenceSnapshot = captureEvidenceSnapshot(record.result);
+      record.history.unshift(previousSnapshot);
       record.history = record.history.slice(0, 5);
       data.modules ||= {};
       if (savedImports.length) data.modules.imports = savedImports;
       record.query = displayQuery;
       record.updatedAt = timestamp;
       record.result = data;
+      if (entityType === "domain") {
+        record.collectionOptions = { ...(record.collectionOptions || {}), domainSources: data.modules.subdomains?.selectedSources || DEFAULT_DOMAIN_SOURCES };
+      }
       state.flash = "Case updated. Your notes and imported reports were preserved.";
     } else {
       const newRecord = {
@@ -1033,6 +1123,7 @@ async function investigate(query, authorized, category = "all", existingCaseId =
         updatedAt: timestamp,
         notes: "",
         result: data,
+        ...(entityType === "domain" ? { collectionOptions: { domainSources: data.modules?.subdomains?.selectedSources || DEFAULT_DOMAIN_SOURCES } } : {}),
       };
       state.cases.unshift(newRecord);
       state.selectedCaseId = newRecord.id;
@@ -1463,7 +1554,14 @@ ROOT.addEventListener("submit", (event) => {
     document.querySelector("[name=scope]")?.focus();
     return;
   }
-  investigate(query, true, category);
+  const domainSources = form.getAll("domainSource").map(String);
+  if (likelyDomainLookup(query) && domainSources.length === 0) {
+    state.flash = "Select at least one passive hostname source for a domain lookup.";
+    render();
+    document.querySelector('input[name="domainSource"]')?.focus();
+    return;
+  }
+  investigate(query, true, category, null, domainSources);
 });
 
 ROOT.addEventListener("click", (event) => {
@@ -1544,7 +1642,10 @@ ROOT.addEventListener("click", (event) => {
     const category = record.result.entity?.type === "username"
       ? record.result.modules?.accounts?.category || "all"
       : "all";
-    investigate(record.query, true, category, record.id);
+    const domainSources = record.result.entity?.type === "domain"
+      ? record.collectionOptions?.domainSources || DEFAULT_DOMAIN_SOURCES
+      : [];
+    investigate(record.query, true, category, record.id, domainSources);
   } else if (action === "delete-case") {
     const record = currentCase();
     if (!record || !window.confirm(`Delete the local case for ${caseSubjectLabel(record)}?`)) return;
@@ -1632,6 +1733,8 @@ ROOT.addEventListener("input", (event) => {
     const isUsername = /^(?:@|username:)/i.test(value);
     const filter = document.querySelector("#account-filter");
     if (filter) filter.hidden = !isUsername;
+    const domainOptions = document.querySelector("#domain-source-options");
+    if (domainOptions) domainOptions.hidden = !likelyDomainLookup(value) && currentCase()?.result?.entity?.type !== "domain";
     updatePrivacyPreview(value);
     if (isUsername) populateAccountCategories();
     return;
@@ -1647,6 +1750,9 @@ ROOT.addEventListener("input", (event) => {
 });
 
 ROOT.addEventListener("change", (event) => {
+  if (event.target.matches('input[name="domainSource"]')) {
+    updatePrivacyPreview(document.querySelector("#query")?.value.trim() || "");
+  }
   if (event.target.matches("#source-directory-category, #source-directory-access")) filterSourceDirectory();
   if (event.target.matches("#relationship-filter")) {
     state.graphTypeFilter = event.target.value;
