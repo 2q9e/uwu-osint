@@ -175,17 +175,17 @@ function emailOverview(record) {
   const dnsCount = countDns(modules.dns);
   const registration = modules.registration;
   const emailDomain = record.result.entity?.domain || "";
-  const policy = (value) => value === "published" ? "Published" : value === "missing" ? "No record" : "Unknown";
+  const policy = (value) => value === "published" ? "Published" : value === "ambiguous" ? "Multiple records" : value === "missing" ? "No record" : "Unknown";
   return `<div class="notice warning-notice">Email address is stored in this browser case. Network requests use only <code>${esc(emailDomain)}</code>; the full address is not sent to public DNS or registry sources.</div>
     <div class="metrics-grid">
       <article class="metric-card"><span class="metric-label">DNS answers</span><strong>${dnsCount}</strong><span class="metric-foot">For the email domain only</span></article>
       <article class="metric-card"><span class="metric-label">MX records</span><strong class="metric-word">${esc(policy(audit?.mxStatus))}</strong><span class="metric-foot">Mail routing published in DNS</span></article>
-      <article class="metric-card"><span class="metric-label">SPF policy</span><strong class="metric-word">${esc(policy(audit?.spfStatus))}</strong><span class="metric-foot">Sender policy TXT record</span></article>
-      <article class="metric-card"><span class="metric-label">DMARC policy</span><strong class="metric-word">${esc(policy(audit?.dmarcStatus))}</strong><span class="metric-foot">_dmarc TXT record</span></article>
+      <article class="metric-card"><span class="metric-label">SPF records</span><strong class="metric-word">${esc(policy(audit?.spfStatus))}</strong><span class="metric-foot">Matching sender-policy TXT records</span></article>
+      <article class="metric-card"><span class="metric-label">DMARC records</span><strong class="metric-word">${esc(policy(audit?.dmarcStatus))}</strong><span class="metric-foot">Matching _dmarc TXT records</span></article>
     </div>
     <section class="overview-grid">
       <article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">01 / MAIL DOMAIN</span><h3>Public mail configuration</h3></div><button class="text-button" data-tab="email">View audit <span>→</span></button></div>
-        <div class="detail-list"><div class="detail-row"><span>MX</span><b>${esc(policy(audit?.mxStatus))}</b></div><div class="detail-row"><span>SPF</span><b>${esc(policy(audit?.spfStatus))}</b></div><div class="detail-row"><span>DMARC</span><b>${esc(policy(audit?.dmarcStatus))}</b></div></div>
+        <div class="detail-list"><div class="detail-row"><span>MX</span><b>${esc(policy(audit?.mxStatus))}</b></div><div class="detail-row"><span>SPF records</span><b>${esc(policy(audit?.spfStatus))}</b></div><div class="detail-row"><span>DMARC records</span><b>${esc(policy(audit?.dmarcStatus))}</b></div></div>
       </article>
       <article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">02 / DOMAIN REGISTRY</span><h3>Registration</h3></div>${registration?.source ? safeLink(registration.source, "RDAP record") : ""}</div>
         ${registration?.status === "ok" ? registrationPreview(registration, "domain") : `<div class="inline-error">${esc(registration?.error || "Registration lookup is not available.")}</div>`}
@@ -371,15 +371,15 @@ function accountsContent(record) {
 function importedContent(record) {
   const modules = record.result.modules?.imports ?? [];
   return `<div class="tab-intro"><div><span class="eyebrow">REPORT INTERCHANGE</span><h2>Imported tool results</h2><p>Common JSON, JSONL, or CSV reports · personal and contact fields are discarded during import.</p></div></div>
-    <section class="panel import-panel"><div class="panel-heading"><div><span class="eyebrow">ADD EXISTING EVIDENCE</span><h3>Import an infrastructure report</h3></div><span class="panel-caption">Stored only with this browser case</span></div><div class="import-controls"><select id="import-tool"><option value="Generic OSINT report">Generic OSINT report</option><option value="Domain report">Domain report</option><option value="Network inventory">Network inventory</option><option value="Certificate report">Certificate report</option></select><label class="file-picker">Choose report<input id="report-file" type="file" accept=".json,.jsonl,.csv,application/json,text/csv" /></label><button class="secondary-button" data-action="import-report">Import to case</button></div><p class="import-footnote">In-scope hostnames and IP addresses are kept. Email addresses, names, phone numbers, and unrelated values are dropped. Maximum file size: 4 MB.</p></section>
-    ${modules.length ? `<div class="import-list">${modules.map((item) => `<section class="panel imported-report"><div class="imported-report-heading"><div><span class="tag">${esc(item.tool)}</span><b>${item.findings.length} finding${item.findings.length === 1 ? "" : "s"}</b></div><span>${esc(shortDate(item.queriedAt))}</span></div>${item.findings.length ? `<ul>${item.findings.slice(0, 500).map((finding) => `<li><span class="tag">${esc(finding.type)}</span><code>${esc(finding.value)}</code></li>`).join("")}</ul>` : `<p class="subtle-note">No in-scope hostname or IP findings were found in that report.</p>`}</section>`).join("")}</div>` : `<div class="empty-panel compact-empty"><h3>No imported reports yet</h3><p>Import JSON, JSONL, or CSV infrastructure output to add scoped findings to this case.</p></div>`}`;
+    <section class="panel import-panel"><div class="panel-heading"><div><span class="eyebrow">ADD EXISTING EVIDENCE</span><h3>Import an infrastructure report</h3></div><span class="panel-caption">Stored only with this browser case</span></div><div class="import-controls"><label class="sr-only" for="import-tool">Report type</label><select id="import-tool"><option value="Generic OSINT report">Generic OSINT report</option><option value="Domain report">Domain report</option><option value="Network inventory">Network inventory</option><option value="Certificate report">Certificate report</option></select><label class="file-picker">Choose report<input id="report-file" type="file" accept=".json,.jsonl,.csv,application/json,text/csv" /></label><button class="secondary-button" data-action="import-report">Import to case</button></div><p class="import-footnote">In-scope hostnames and IP addresses are kept. Email addresses, names, phone numbers, and unrelated values are dropped. Maximum file size: 4 MB.</p></section>
+    ${modules.length ? `<div class="import-list">${modules.map((item) => `<section class="panel imported-report"><div class="imported-report-heading"><div><span class="tag">${esc(item.tool)}</span><b>${item.findings.length} finding${item.findings.length === 1 ? "" : "s"}</b></div><span>${esc(shortDate(item.queriedAt))}</span></div><p class="import-provenance">${item.filename ? `File: ${esc(item.filename)} · ` : ""}${esc(item.inputRecords ?? "?")} input record${item.inputRecords === 1 ? "" : "s"} · ${esc(item.invalidLines ?? 0)} invalid line${item.invalidLines === 1 ? "" : "s"} · ${esc(item.duplicateFindings ?? 0)} duplicate finding${item.duplicateFindings === 1 ? "" : "s"}${item.truncatedRecords ? ` · ${esc(item.truncatedRecords)} input record${item.truncatedRecords === 1 ? "" : "s"} skipped by the 10,000-row limit` : ""}${item.omittedCandidates ? ` · ${esc(item.omittedCandidates)} matching candidate${item.omittedCandidates === 1 ? "" : "s"} omitted by the 2,000-finding limit` : ""}</p>${item.findings.length ? `<ul>${item.findings.slice(0, 500).map((finding) => `<li><span class="tag">${esc(finding.type)}</span><code>${esc(finding.value)}</code></li>`).join("")}</ul>` : `<p class="subtle-note">No in-scope hostname or IP findings were found in that report.</p>`}</section>`).join("")}</div>` : `<div class="empty-panel compact-empty"><h3>No imported reports yet</h3><p>Import JSON, JSONL, or CSV infrastructure output to add scoped findings to this case.</p></div>`}`;
 }
 
 function emailAuditContent(record) {
   const audit = record.result.modules?.emailAudit;
   if (!audit) return `<div class="empty-panel"><span class="empty-glyph">✉</span><h3>No email-domain audit</h3><p>Public DNS checks are available for an email’s domain.</p></div>`;
   const rows = [
-    ["Domain", audit.domain], ["MX status", audit.mxStatus], ["SPF status", audit.spfStatus], ["DMARC status", audit.dmarcStatus],
+    ["Domain", audit.domain], ["MX status", audit.mxStatus], ["SPF record status", audit.spfStatus], ["DMARC record status", audit.dmarcStatus],
   ];
   const records = [
     ["MX records", audit.mxRecords], ["SPF records", audit.spfRecords], ["DMARC records", audit.dmarcRecords],
@@ -598,7 +598,6 @@ function render() {
         <header class="topbar"><div class="breadcrumb"><span>Workspace</span><i>/</i><b>${inTools ? "Built-in modules" : "Research board"}</b></div><div class="topbar-actions"><button class="topbar-view-switch" data-action="${inTools ? "open-workspace" : "open-tools"}">${inTools ? "Research board" : "Built-in modules"}</button><span class="passive-label"><i></i>${!inTools && phone ? "LOCAL FORMAT CHECK" : !inTools && email ? "DOMAIN-ONLY SOURCE QUERIES" : "PUBLIC SOURCE QUERIES"}</span><div class="mobile-case-tools">${!inTools && state.cases.length ? `<label class="sr-only" for="mobile-case-select">Switch saved case</label><select id="mobile-case-select"><option value="" ${record ? "" : "selected"}>New case</option>${state.cases.map((item) => `<option value="${esc(item.id)}" ${item.id === record?.id ? "selected" : ""}>${esc(caseSubjectLabel(item))}</option>`).join("")}</select>` : ""}<button data-action="new-case">＋ New</button>${state.cases.length ? `<button class="mobile-clear-cases" data-action="clear-cases" aria-label="Clear all saved cases" title="Clear all saved cases">Clear</button>` : ""}</div>${record && !inTools ? `<button class="icon-button" data-action="refresh-case" title="Refresh current case" aria-label="Refresh current case" ${state.busy ? "disabled" : ""}>↻</button><button class="icon-button" data-action="export-csv" title="Export evidence as CSV" aria-label="Export evidence as CSV">▤</button><button class="icon-button" data-action="export" title="Export current case as JSON" aria-label="Export current case as JSON">⇩</button>` : ""}</div></header>
         <div class="content-wrap">
           <section class="page-heading"><div><span class="eyebrow">${inTools ? "NATIVE RESEARCH MODULES" : `INTELLIGENCE / ${record ? esc(record.result.entity?.type?.toUpperCase()) : "START HERE"}`}</span><h1>${inTools ? `Research <em>modules.</em>` : `Public surface <em>research.</em>`}</h1><p>${inTools ? "Built-in collection, local file inspection, and report interchange." : "Research public infrastructure, self-audit accounts, review email-domain DNS, and validate phone format locally."}</p></div><div class="heading-ornament"><div class="ornament-ring ring-one"></div><div class="ornament-ring ring-two"></div><div class="ornament-core">uwu</div></div></section>
-          ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(username ? `@${record.result.entity.value}` : record?.query || "")}" placeholder="Domain · IP · ASN · @username · email · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email domain · E.164 phone format</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>`}
           ${inTools ? "" : `<form class="search-panel" id="lookup-form"><div class="search-icon">⌕</div><div class="search-input-wrap"><label for="query">SUBJECT</label><input id="query" name="query" value="${esc(username ? `@${record.result.entity.value}` : record?.query || "")}" placeholder="Domain · IP · ASN · @username · email · +14165550123" autocomplete="off" ${state.busy ? "disabled" : ""} /><div class="search-hint">Domain/URL · public IP · ASN · self-audit username · email domain · E.164 phone format</div><div class="account-filter" id="account-filter" ${username ? "" : "hidden"}><label for="account-category">PROFILE CATEGORY</label><select id="account-category" name="category" ${state.accountCategories.length ? "" : "disabled"}><option value="all">All categories</option>${state.accountCategories.map((item) => `<option value="${esc(item)}" ${state.accountCategory === item ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></div></div><div class="search-divider"></div><div class="scope-check"><label><input type="checkbox" name="scope" ${state.busy ? "disabled" : ""} /><span class="custom-check"></span><span>I own this account, asset, or contact detail, or have permission to research it</span></label><button class="submit-button" type="submit" ${state.busy ? "disabled" : ""}>${state.busy ? `<span class="spinner"></span>Collecting` : `Investigate <span>↗</span>`}</button></div></form>${privacyDisclosure(record)}`}
           ${inTools ? "" : flashMessage()}
           ${inTools ? toolsDirectory() : record ? `
@@ -758,7 +757,7 @@ function exportEvidenceCsv(record) {
   URL.revokeObjectURL(url);
 }
 
-function parseCsv(text) {
+function parseCsv(text, stats = {}) {
   const rows = [];
   let row = [];
   let field = "";
@@ -776,7 +775,11 @@ function parseCsv(text) {
     } else if ((character === "\n" || character === "\r") && !quoted) {
       if (character === "\r" && text[index + 1] === "\n") index += 1;
       row.push(field);
-      if (row.some((item) => item.trim())) rows.push(row);
+      if (row.some((item) => item.trim())) {
+        stats.totalCsvRecords = (stats.totalCsvRecords || 0) + 1;
+        if (rows.length < 10001) rows.push(row);
+        else stats.truncatedRecords = (stats.truncatedRecords || 0) + 1;
+      }
       row = [];
       field = "";
     } else {
@@ -784,8 +787,14 @@ function parseCsv(text) {
     }
   }
   row.push(field);
-  if (row.some((item) => item.trim())) rows.push(row);
+  if (row.some((item) => item.trim())) {
+    stats.totalCsvRecords = (stats.totalCsvRecords || 0) + 1;
+    if (rows.length < 10001) rows.push(row);
+    else stats.truncatedRecords = (stats.truncatedRecords || 0) + 1;
+  }
+  if (quoted) stats.invalidLines = (stats.invalidLines || 0) + 1;
   const headers = (rows.shift() || []).map((item) => item.trim().toLowerCase());
+  stats.inputRecords = Math.max(0, (stats.totalCsvRecords || 0) - (headers.length ? 1 : 0));
   return rows.slice(0, 10000).map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
 }
 
@@ -809,17 +818,18 @@ function normalizedFinding(value, typeHint, scope) {
     return { type: "IP", value: candidate };
   }
   candidate = candidate.toLowerCase();
-  if (!/(?:^|\.)(?:[a-z0-9-]+\.)+[a-z]{2,63}$/.test(candidate)) return null;
+  const labels = candidate.split(".");
+  if (labels.length < 2 || labels.some((label) => label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) || !/[a-z]/.test(labels.at(-1))) return null;
   if (scopeDomain && candidate !== scopeDomain && !candidate.endsWith(`.${scopeDomain}`)) return null;
   if (!scopeDomain) return null;
   if (/email|person|phone|user|account|address|contact|credential|leak/.test(typeHint)) return null;
   return { type: "HOST", value: candidate };
 }
 
-function collectInfrastructure(value, scope, output, hint = "") {
-  if (output.length >= 2000 || value == null) return;
+function collectInfrastructure(value, scope, output, hint = "", stats = { omittedCandidates: 0 }) {
+  if (value == null) return;
   if (Array.isArray(value)) {
-    for (const item of value) collectInfrastructure(item, scope, output, hint);
+    for (const item of value) collectInfrastructure(item, scope, output, hint, stats);
     return;
   }
   if (!value || typeof value !== "object") return;
@@ -832,9 +842,12 @@ function collectInfrastructure(value, scope, output, hint = "") {
     const candidateHint = `${typeHint} ${normalizedKey}`;
     if (typeof child === "string" && (ipKeys.has(normalizedKey) || hostKeys.has(normalizedKey) || (normalizedKey === "data" && /host|domain|internet_name|ip_address/.test(typeHint)))) {
       const finding = normalizedFinding(child, candidateHint, scope);
-      if (finding) output.push(finding);
+      if (finding) {
+        if (output.length < 2000) output.push(finding);
+        else stats.omittedCandidates += 1;
+      }
     }
-    if (typeof child === "object") collectInfrastructure(child, scope, output, typeHint);
+    if (typeof child === "object") collectInfrastructure(child, scope, output, typeHint, stats);
   }
 }
 
@@ -867,26 +880,40 @@ async function importReport() {
     }
     const scope = { ...(record.result.entity || {}), allowedIps };
     const findings = [];
+    const importStats = { omittedCandidates: 0, invalidLines: 0, inputRecords: 0, truncatedRecords: 0 };
     if (file.name.toLowerCase().endsWith(".csv")) {
-      collectInfrastructure(parseCsv(text), scope, findings);
+      const rows = parseCsv(text, importStats);
+      collectInfrastructure(rows, scope, findings, "", importStats);
     } else if (file.name.toLowerCase().endsWith(".jsonl")) {
       const parsed = [];
-      for (const line of text.split(/\r?\n/).filter((item) => item.trim()).slice(0, 10000)) {
-        try { parsed.push(JSON.parse(line)); } catch { /* Ignore non-JSON progress lines. */ }
+      const lines = text.split(/\r?\n/).filter((item) => item.trim());
+      importStats.truncatedRecords = Math.max(0, lines.length - 10000);
+      for (const line of lines.slice(0, 10000)) {
+        try { parsed.push(JSON.parse(line)); } catch { importStats.invalidLines += 1; }
       }
-      collectInfrastructure(parsed, scope, findings);
+      importStats.inputRecords = parsed.length;
+      collectInfrastructure(parsed, scope, findings, "", importStats);
     } else {
-      collectInfrastructure(JSON.parse(text), scope, findings);
+      const parsed = JSON.parse(text);
+      importStats.inputRecords = Array.isArray(parsed) ? parsed.length : parsed && typeof parsed === "object" ? 1 : 0;
+      collectInfrastructure(parsed, scope, findings, "", importStats);
     }
     const unique = Array.from(new Map(findings.map((item) => [`${item.type}:${item.value}`, item])).values());
+    importStats.duplicateFindings = findings.length - unique.length;
     const tool = document.querySelector("#import-tool")?.value || "Imported tool";
     if (!record.result.modules.imports) record.result.modules.imports = [];
     record.result.modules.imports.push({
       status: "ok",
       tool,
+      filename: file.name,
       source: "Local report import",
       queriedAt: new Date().toISOString(),
       findings: unique,
+      inputRecords: importStats.inputRecords,
+      invalidLines: importStats.invalidLines,
+      duplicateFindings: importStats.duplicateFindings,
+      omittedCandidates: importStats.omittedCandidates,
+      truncatedRecords: importStats.truncatedRecords,
       droppedPersonalFields: true,
     });
     record.updatedAt = new Date().toISOString();

@@ -5,13 +5,13 @@ A local-first workspace for authorized research on public internet infrastructur
 ## Features
 
 - **Domain footprint:** DNS and DNSSEC response details, RDAP registration, certificate transparency names, passive hostname discovery, and public A/AAAA resolution for a bounded set of discovered hosts. DNS provider errors stay distinct from empty answers. Special-use and common internal suffixes are blocked before public queries.
-- **Email domain audit:** validate a standard email shape, then inspect only its domain’s MX, SPF, and DMARC DNS records plus RDAP registration. The full address is not sent to those public sources; mailbox existence and owner identity are not checked.
+- **Email domain audit:** validate a standard email shape, then inspect only its domain’s MX, SPF, and DMARC DNS records plus RDAP registration. SPF/DMARC statuses report matching-record presence and duplicate ambiguity, not complete policy validity. The full address is not sent to those public sources; mailbox existence and owner identity are not checked.
 - **Phone format check:** normalize international phone numbers to E.164 syntax locally. The app does not look up subscriber identity, carrier, location, or account data.
 - **URL, IP, and ASN intake:** accept HTTP(S) URLs by extracting their hostname, as well as globally routable IPv4/IPv6 addresses and ASN values.
 - **IP and ASN records:** registration and network allocation details from RDAP services selected through IANA bootstrap data. Only globally routable public IP addresses are accepted.
 - **Account footprint:** check a username you own or are authorized to audit against up to 25 public profile URLs. Results are marked as possible matches, not proof of identity or account ownership.
 - **Local metadata inspection:** recognize selected JPEG, PNG, TIFF, PDF, and DOCX metadata fields. Files are sent only to the loopback app server, parsed in memory, and not saved. An empty result means this parser found no supported fields; it does not prove the file has no metadata.
-- **Report workspace:** import JSON, JSONL, and CSV reports in the browser. The importer keeps only in-scope hostnames and IP addresses and drops person, contact, and credential fields.
+- **Report workspace:** import JSON, JSONL, and CSV reports in the browser. The importer keeps only in-scope hostnames and IP addresses, drops person/contact/credential fields, and records the filename, input count, invalid lines, duplicates, and any row or finding caps.
 - **External source shortcuts:** launch single authorized searches in AlienVault OTX, OpenCorporates, and Academic Torrents. Epieos opens for a manual email or phone search without the app submitting the value. Results remain on the provider's site and are not collected by the app.
 - **Case notebook:** cases and notes stay in browser local storage. Refresh history keeps up to five compact summaries per case. Export a case to JSON when you need a portable copy, or clear saved cases and notes from the workspace controls.
 
@@ -37,7 +37,7 @@ python3 server.py
 
 Open <http://127.0.0.1:8080>. To choose another port, run `python3 server.py --port 8787`.
 
-The server binds to loopback (`127.0.0.1`), so it is intended for local use.
+The server binds to loopback (`127.0.0.1`), accepts only loopback Host headers, rejects cross-origin API requests, caps concurrent requests, and uses connection timeouts. It is intended for local use.
 
 ## External source searches
 
@@ -54,4 +54,4 @@ Open **Built-in modules → Search external sources**, enter a query, confirm au
 
 ## Privacy
 
-The Python server keeps no database and does not log query values. Email-domain lookups send only the domain to public DNS and RDAP sources; phone validation runs locally with no network request. Search subjects are sent to other selected public providers only when you launch those searches. Epieos is manual: the app opens its site without submitting an email address or phone number. Username checks query the profile sites listed by the live definitions. Cases and notes are held in browser local storage until you delete them, use **Clear saved cases**, or clear site data. Email addresses, phone numbers, and notes in cases may be sensitive; exports include the case subject. Metadata inspection results remain in memory and are not included in saved cases. Do not enter secrets or private personal data.
+The Python server keeps no database and does not log request targets or query values. Email-domain lookups send only the domain to public DNS and RDAP sources; phone validation runs locally with no network request. Search subjects are sent to other selected public providers only when you launch those searches. Epieos is manual: the app opens its site without submitting an email address or phone number. Username checks query the profile sites listed by the live definitions. Cases and notes are held in browser local storage until you delete them, use **Clear saved cases**, or clear site data. Email addresses, phone numbers, imported filenames, and notes in cases may be sensitive; exports include case subjects and saved import filenames. Metadata inspection results remain in memory and are not included in saved cases. Do not enter secrets or private personal data.

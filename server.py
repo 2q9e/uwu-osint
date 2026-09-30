@@ -39,6 +39,7 @@ BOOTSTRAP_TTL_SECONDS = 6 * 60 * 60
 PROFILE_LOCK = threading.Lock()
 PROFILE_CACHE: tuple[float, dict] | None = None
 PROFILE_CACHE_TTL_SECONDS = 12 * 60 * 60
+PROFILE_CACHE_MAX_STALE_SECONDS = 3 * 24 * 60 * 60
 PROFILE_DATA_URL = "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json"
 PROFILE_DATA_LICENSE = "CC BY-SA 4.0"
 SPECIAL_USE_SUFFIXES = ("alt", "example", "invalid", "localhost", "onion", "test", "local", "internal", "lan", "home", "arpa")
@@ -120,9 +121,33 @@ def bootstrap_url(document: dict, predicate) -> str:
             for base in bases:
                 if not isinstance(base, str):
                     continue
-                parsed = urlsplit(base)
-                if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password:
-                    return base.rstrip("/") + "/"
+                try:
+                    parsed = urlsplit(base)
+                    port = parsed.port
+                except ValueError:
+                    continue
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.hostname
+                    or parsed.username
+                    or parsed.password
+                    or port not in (None, 443)
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    continue
+                host = parsed.hostname.lower()
+                try:
+                    address = ipaddress.ip_address(host)
+                except ValueError:
+                    try:
+                        _public_addresses(host)
+                    except LookupError:
+                        continue
+                else:
+                    if not address.is_global:
+                        continue
+                return base.rstrip("/") + "/"
     raise LookupError("IANA has no RDAP service listed for this value.")
 
 
@@ -383,15 +408,21 @@ def get_email_audit(domain: str, dns: dict) -> dict:
     txt_records = dns.get("records", {}).get("TXT", [])
     spf_records = [
         item for item in txt_records
-        if str(item.get("data", "")).strip('"').lower().startswith("v=spf1")
+        if re.match(r"^v=spf1(?:\s|$)", str(item.get("data", "")).strip('"'), re.IGNORECASE)
     ]
     try:
-        dmarc_records = query_dns(f"_dmarc.{domain}", "TXT")["answers"]
+        dmarc_txt_records = query_dns(f"_dmarc.{domain}", "TXT")["answers"]
         dmarc_error = None
     except LookupError as exc:
-        dmarc_records = []
-        dmarc_error = str(exc)
+        dmarc_txt_records = []
+        dmarc_error = None if "NXDOMAIN" in str(exc) else str(exc)
+    dmarc_records = [
+        item for item in dmarc_txt_records
+        if re.match(r"^v=dmarc1(?:;|$)", str(item.get("data", "")).strip('"'), re.IGNORECASE)
+    ]
     mx_records = dns.get("records", {}).get("MX", [])
+    spf_status = "ambiguous" if len(spf_records) > 1 else "published" if spf_records else "missing" if txt_available else "unknown"
+    dmarc_status = "ambiguous" if len(dmarc_records) > 1 else "published" if dmarc_records else "missing" if not dmarc_error else "unknown"
     return {
         "source": "https://cloudflare-dns.com/dns-query",
         "queriedAt": now_iso(),
@@ -399,11 +430,11 @@ def get_email_audit(domain: str, dns: dict) -> dict:
         "mxRecords": mx_records,
         "mxStatus": "published" if mx_records else "missing" if mx_available else "unknown",
         "spfRecords": spf_records,
-        "spfStatus": "published" if spf_records else "missing" if txt_available else "unknown",
+        "spfStatus": spf_status,
         "dmarcRecords": dmarc_records,
-        "dmarcStatus": "published" if dmarc_records else "missing" if not dmarc_error else "unknown",
+        "dmarcStatus": dmarc_status,
         "dmarcError": dmarc_error,
-        "notice": "Checks public mail-domain DNS only. It does not verify a mailbox, identify a person, or test message delivery.",
+        "notice": "Checks public mail-domain DNS only. SPF and DMARC statuses indicate matching record presence and duplicate ambiguity, not full policy validity. It does not verify a mailbox, identify a person, or test message delivery.",
     }
 
 
@@ -449,12 +480,30 @@ def get_certificates(domain: str) -> dict:
             wildcard = name.startswith("*.")
             normalized = name[2:] if wildcard else name
             if normalized == domain or normalized.endswith(suffix):
-                names[normalized] = {
-                    "name": normalized,
-                    "wildcard": wildcard,
-                    "firstSeen": cert.get("entry_timestamp"),
-                    "issuer": cert.get("issuer_name"),
-                }
+                first_seen = cert.get("entry_timestamp")
+                try:
+                    parsed_first_seen = datetime.fromisoformat(str(first_seen).replace("Z", "+00:00"))
+                    if parsed_first_seen.tzinfo is None:
+                        parsed_first_seen = parsed_first_seen.replace(tzinfo=timezone.utc)
+                    first_seen = parsed_first_seen.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                except (TypeError, ValueError):
+                    first_seen = None
+                existing = names.get(normalized)
+                if existing is None:
+                    names[normalized] = {
+                        "name": normalized,
+                        "wildcard": wildcard,
+                        "firstSeen": first_seen,
+                        "issuers": [cert["issuer_name"]] if cert.get("issuer_name") else [],
+                    }
+                else:
+                    existing["wildcard"] = existing["wildcard"] or wildcard
+                    if first_seen and (not existing["firstSeen"] or first_seen < existing["firstSeen"]):
+                        existing["firstSeen"] = first_seen
+                    issuer = cert.get("issuer_name")
+                    if issuer and issuer not in existing["issuers"]:
+                        existing["issuers"].append(issuer)
+                        existing["issuers"].sort(key=str.casefold)
     sorted_names = sorted(names.values(), key=lambda item: item["name"])
     return {
         "source": "https://crt.sh/?" + query_string,
@@ -645,7 +694,7 @@ def profile_definitions() -> dict:
         if not isinstance(data, dict) or not isinstance(data.get("sites"), list):
             raise LookupError("The public profile catalog returned an unexpected document.")
     except LookupError:
-        if cached:
+        if cached and time.monotonic() - cached[0] <= PROFILE_CACHE_MAX_STALE_SECONDS:
             return {**cached[1], "_catalogStale": True}
         raise
     with PROFILE_LOCK:
@@ -1058,6 +1107,10 @@ def investigate(value: str, authorized: bool = False, category: str = "all", lim
 class Handler(BaseHTTPRequestHandler):
     server_version = "uwu-osint/0.1"
 
+    def setup(self):
+        self.request.settimeout(10)
+        super().setup()
+
     def end_headers(self):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1073,7 +1126,63 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def validate_local_request(self, *, api: bool = False) -> bool:
+        raw_host = self.headers.get("Host", "")
+        try:
+            request_host = urlsplit(f"//{raw_host}")
+            request_port = request_host.port
+        except ValueError:
+            request_host = None
+            request_port = None
+        valid_hosts = {"127.0.0.1", "localhost", "::1"}
+        host_valid = (
+            request_host is not None
+            and request_host.hostname is not None
+            and request_host.hostname.lower() in valid_hosts
+            and not request_host.username
+            and not request_host.password
+            and request_host.path == ""
+            and not request_host.query
+            and not request_host.fragment
+            and request_port in (None, self.server.server_port)
+        )
+        if not host_valid:
+            self.send_json(403, {"error": "This local service accepts loopback requests only."})
+            return False
+        if api:
+            fetch_site = self.headers.get("Sec-Fetch-Site", "").lower()
+            origin = self.headers.get("Origin")
+            if fetch_site == "cross-site":
+                self.send_json(403, {"error": "Cross-site requests to the local API are blocked."})
+                return False
+            if origin:
+                try:
+                    parsed_origin = urlsplit(origin)
+                    origin_port = parsed_origin.port
+                except ValueError:
+                    parsed_origin = None
+                    origin_port = None
+                origin_valid = (
+                    parsed_origin is not None
+                    and parsed_origin.scheme == "http"
+                    and parsed_origin.hostname is not None
+                    and parsed_origin.hostname.lower() == request_host.hostname.lower()
+                    and (origin_port if origin_port is not None else 80)
+                    == (request_port if request_port is not None else 80)
+                    and not parsed_origin.username
+                    and not parsed_origin.password
+                    and parsed_origin.path == ""
+                    and not parsed_origin.query
+                    and not parsed_origin.fragment
+                )
+                if not origin_valid:
+                    self.send_json(403, {"error": "The API request origin does not match this local workspace."})
+                    return False
+        return True
+
     def do_GET(self):
+        if not self.validate_local_request(api=urlsplit(self.path).path.startswith("/api/")):
+            return
         path = urlsplit(self.path).path
         if path == "/api/health":
             self.send_json(200, {"ok": True, "service": "uwu-osint"})
@@ -1109,6 +1218,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
+        if not self.validate_local_request(api=True):
+            return
         if path not in {"/api/investigate", "/api/metadata"}:
             self.send_json(404, {"error": "Not found"})
             return
@@ -1148,16 +1259,45 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, result)
 
     def log_message(self, fmt, *args):
-        # Do not log search values or request bodies.
-        if self.path.startswith("/api/"):
-            print(f"{self.log_date_time_string()} {self.command} {urlsplit(self.path).path}")
+        # Request targets can contain private query values; keep access logs quiet.
+        return
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Cap inbound work so lookups cannot spawn an unlimited worker pool."""
+
+    request_limit = 6
+
+    def __init__(self, *args, **kwargs):
+        self._request_slots = threading.BoundedSemaphore(self.request_limit)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local uwu-osint research workspace.")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = BoundedThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"uwu-osint is available at http://127.0.0.1:{args.port} (loopback only)")
     try:
         server.serve_forever()
