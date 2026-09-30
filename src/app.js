@@ -137,6 +137,132 @@ function dnsSummary(dns) {
     .map((row) => `<span class="mini-pill"><b>${esc(row.type)}</b> ${row.count}</span>`).join("") || `<span class="muted">No records returned</span>`;
 }
 
+const VISUAL_SIGNAL_COLORS = ["#b9a7ff", "#8bd5bf", "#e7bd7c", "#83b8e8", "#e99aaa", "#a5c77e", "#d292df"];
+
+function visualSignals(record) {
+  const modules = record.result?.modules || {};
+  const signals = [];
+  const add = (label, value) => {
+    const count = Math.max(0, Number(value) || 0);
+    if (count) signals.push({ label, count, color: VISUAL_SIGNAL_COLORS[signals.length % VISUAL_SIGNAL_COLORS.length] });
+  };
+  add("DNS answers", countDns(modules.dns));
+  add("Hostnames", modules.subdomains?.totalFound ?? modules.subdomains?.hosts?.length ?? 0);
+  add("Certificate names", modules.certificates?.names?.length ?? 0);
+  add("PTR names", modules.reverseDns?.names?.length ?? 0);
+  if (modules.accounts) {
+    add("Possible profiles", modules.accounts.found ?? modules.accounts.sites?.filter((site) => site.status === "found").length ?? 0);
+    add("No profile match", modules.accounts.notFound ?? 0);
+    add("Unclear profile checks", modules.accounts.unknown ?? 0);
+  }
+  add("Imported findings", (modules.imports || []).reduce((sum, report) => sum + (report.findings?.length || 0), 0));
+  if (modules.phoneValidation) add("Local format check", 1);
+  if (!signals.length && modules.registration?.status === "ok") add("Registry response", 1);
+  return signals;
+}
+
+function signalDonutCard(record) {
+  const signals = visualSignals(record);
+  const total = signals.reduce((sum, item) => sum + item.count, 0);
+  const circumference = 2 * Math.PI * 34;
+  let offset = 0;
+  const arcs = signals.map((item) => {
+    const length = circumference * item.count / Math.max(total, 1);
+    const arc = `<circle cx="48" cy="48" r="34" fill="none" stroke="${item.color}" stroke-width="12" stroke-dasharray="${length.toFixed(2)} ${(circumference - length).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" />`;
+    offset += length;
+    return arc;
+  }).join("");
+  const legend = signals.length
+    ? signals.map((item) => `<li><i style="--signal-color:${item.color}"></i><span>${esc(item.label)}</span><b>${item.count}</b></li>`).join("")
+    : `<li class="visual-no-data">No countable observations yet</li>`;
+  return `<article class="panel visual-card"><div class="visual-card-heading"><span><span class="eyebrow">EVIDENCE MIX</span><h3>Signal types</h3></span><span class="visual-card-caption">${signals.length} categories</span></div><div class="donut-layout"><svg class="signal-donut" viewBox="0 0 96 96" role="img" aria-label="${total} observations across ${signals.length} evidence categories"><circle cx="48" cy="48" r="34" fill="none" stroke="rgba(234,228,255,.08)" stroke-width="12" />${arcs ? `<g transform="rotate(-90 48 48)">${arcs}</g>` : ""}<text x="48" y="46" text-anchor="middle">${total}</text><text class="donut-caption" x="48" y="59" text-anchor="middle">signals</text></svg><ul class="visual-legend">${legend}</ul></div></article>`;
+}
+
+function sourceHealthCard(record) {
+  const sources = sourcesFor(record.result).map((item) => ({ label: item.title || item.name, status: item.module?.status || "unknown" }));
+  if (!sources.length && record.result?.modules?.phoneValidation) sources.push({ label: "Local phone format check", status: "ok" });
+  const stateFor = (status) => status === "ok" ? "ok" : status === "partial" ? "partial" : status === "skipped" ? "skipped" : "unavailable";
+  const counts = { ok: 0, partial: 0, unavailable: 0, skipped: 0 };
+  sources.forEach((item) => { counts[stateFor(item.status)] += 1; });
+  const total = sources.length || 1;
+  const bar = Object.entries(counts).filter(([, count]) => count).map(([status, count]) => `<span class="source-health-segment ${status}" style="width:${(count / total * 100).toFixed(1)}%"></span>`).join("");
+  const rows = sources.slice(0, 7).map((item) => `<li><i class="health-dot ${stateFor(item.status)}"></i><span>${esc(item.label)}</span><b>${esc(item.status === "ok" ? "Complete" : item.status === "partial" ? "Partial" : item.status === "skipped" ? "Skipped" : "Unavailable")}</b></li>`).join("");
+  return `<article class="panel visual-card"><div class="visual-card-heading"><span><span class="eyebrow">SOURCE COVERAGE</span><h3>Collection health</h3></span><span class="visual-card-caption">${sources.length} checks</span></div>${sources.length ? `<div class="source-health-stack" role="img" aria-label="${counts.ok} complete, ${counts.partial} partial, ${counts.unavailable} unavailable, ${counts.skipped} skipped">${bar}</div><div class="source-health-key"><span><i class="ok"></i>${counts.ok} complete</span><span><i class="partial"></i>${counts.partial} partial</span><span><i class="unavailable"></i>${counts.unavailable} unavailable</span><span><i class="skipped"></i>${counts.skipped} skipped</span></div><ul class="source-health-list">${rows}</ul>${sources.length > 7 ? `<p class="visual-card-caption">Showing 7 of ${sources.length} source checks.</p>` : ""}` : `<div class="visual-empty">No provider checks apply to this case.</div>`}</article>`;
+}
+
+function visualMetricCount(metrics) {
+  const countKeys = ["DNS answers", "Certificate names", "Discovered hosts", "URLScan public results", "PTR names", "Profile checks", "Imported reports"];
+  let total = 0;
+  for (const key of countKeys) {
+    const value = metrics?.[key];
+    if (value == null) continue;
+    const numbers = String(value).match(/\d+/g) || [];
+    if (!numbers.length) continue;
+    total += key === "Profile checks" ? numbers.reduce((sum, number) => sum + Number(number), 0) : Number(numbers[0]);
+  }
+  if (metrics?.["Phone check"]) total += 1;
+  return total;
+}
+
+function signalTrendCard(record) {
+  const past = Array.isArray(record.history) ? record.history.slice(0, 5).reverse() : [];
+  const snapshots = past.map((item) => ({ date: item.generatedAt, count: visualMetricCount(item.metrics || {}) }));
+  const current = summarizeResult(record.result);
+  snapshots.push({ date: current.generatedAt, count: visualMetricCount(current.metrics || {}) });
+  const width = 360, height = 128, left = 22, right = 338, top = 18, baseline = 91;
+  const maximum = Math.max(1, ...snapshots.map((item) => item.count));
+  const points = snapshots.map((item, index) => ({
+    ...item,
+    x: snapshots.length === 1 ? (left + right) / 2 : left + index * (right - left) / (snapshots.length - 1),
+    y: baseline - item.count / maximum * (baseline - top),
+    label: `R${index + 1}`,
+  }));
+  const line = points.map((point, index) => `${index ? "L" : "M"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
+  const area = `${line} L ${points.at(-1).x.toFixed(1)} ${baseline} L ${points[0].x.toFixed(1)} ${baseline} Z`;
+  const grid = [0, .5, 1].map((fraction) => {
+    const y = baseline - fraction * (baseline - top);
+    const value = Math.round(maximum * fraction);
+    return `<line x1="${left}" y1="${y}" x2="${right}" y2="${y}"/><text x="${left - 7}" y="${y + 3}" text-anchor="end">${value}</text>`;
+  }).join("");
+  const dots = points.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="3.5"><title>${esc(shortDate(point.date))}: ${point.count} source counts</title></circle><text class="trend-run-label" x="${point.x}" y="111" text-anchor="middle">${point.label}</text>`).join("");
+  return `<article class="panel visual-card"><div class="visual-card-heading"><span><span class="eyebrow">REFRESH TREND</span><h3>Signal counts by run</h3></span><button class="text-button" data-tab="history">History <span>→</span></button></div><svg class="signal-trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="Source result counts across ${snapshots.length} saved collection runs"><g class="trend-grid">${grid}</g><path class="trend-area" d="${area}"/><path class="trend-line" d="${line}"/>${dots}</svg><p class="visual-card-caption">Source counters, not unique entities · ${snapshots.length} run${snapshots.length === 1 ? "" : "s"}</p></article>`;
+}
+
+function visualRelationshipCard(record) {
+  const graph = relationshipGraphData(record);
+  if (!graph.edges.length) return "";
+  const edges = graph.edges.slice(0, 12);
+  const visibleIds = new Set(edges.flatMap((edge) => [edge.from.id, edge.to.id]));
+  const nodes = graph.nodes.filter((node) => visibleIds.has(node.id));
+  const levels = [...new Set(nodes.map((node) => node.level))].sort((a, b) => a - b);
+  const grouped = new Map(levels.map((level) => [level, nodes.filter((node) => node.level === level).slice(0, 5)]));
+  const shownIds = new Set([...grouped.values()].flat().map((node) => node.id));
+  const shownEdges = edges.filter((edge) => shownIds.has(edge.from.id) && shownIds.has(edge.to.id));
+  const maxCount = Math.max(1, ...[...grouped.values()].map((items) => items.length));
+  const height = Math.max(170, maxCount * 55 + 46);
+  const width = Math.max(600, 24 + Math.max(...levels) * 220 + 208);
+  const positions = new Map();
+  for (const level of levels) grouped.get(level).forEach((node, index) => positions.set(node.id, { x: 14 + level * 220, y: 22 + index * 55 }));
+  const paths = shownEdges.map((edge) => {
+    const from = positions.get(edge.from.id), to = positions.get(edge.to.id);
+    if (!from || !to) return "";
+    const forward = from.x <= to.x;
+    const sx = forward ? from.x + 190 : from.x, tx = forward ? to.x : to.x + 190;
+    const bend = Math.max(24, Math.abs(tx - sx) * .42);
+    return `<path class="mini-graph-edge" d="M ${sx} ${from.y + 20} C ${sx + (forward ? bend : -bend)} ${from.y + 20}, ${tx - (forward ? bend : -bend)} ${to.y + 20}, ${tx} ${to.y + 20}"><title>${esc(`${edge.label} · ${edge.source}`)}</title></path>`;
+  }).join("");
+  const nodeHtml = nodes.filter((node) => positions.has(node.id)).map((node) => {
+    const point = positions.get(node.id);
+    const label = node.label.length > 25 ? `${node.label.slice(0, 22)}…` : node.label;
+    return `<g class="mini-graph-node ${node.kind}" transform="translate(${point.x} ${point.y})"><rect width="190" height="40" rx="8"/><circle cx="13" cy="20" r="4"/><text class="mini-graph-type" x="25" y="15">${esc(node.type.toUpperCase())}</text><text class="mini-graph-label" x="25" y="30"><title>${esc(node.label)}</title>${esc(label)}</text></g>`;
+  }).join("");
+  return `<article class="panel visual-card visual-graph-card"><div class="visual-card-heading"><span><span class="eyebrow">RELATIONSHIP PREVIEW</span><h3>Infrastructure links</h3></span><button class="text-button" data-tab="graph">Open graph <span>→</span></button></div><p class="visual-card-caption">${graph.nodes.length} entities · ${graph.edges.length} sourced links${graph.omitted ? ` · ${graph.omitted} more omitted by the graph limit` : ""}</p><div class="mini-graph-scroll"><svg class="mini-relationship-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Preview of ${nodes.length} infrastructure entities and ${shownEdges.length} sourced links">${paths}${nodeHtml}</svg></div></article>`;
+}
+
+function caseVisualDashboard(record) {
+  return `<section class="case-visual-section"><div class="case-visual-heading"><div><span class="eyebrow">VISUAL ANALYSIS</span><h3>Evidence at a glance</h3><p>Counts and source outcomes from this saved collection.</p></div></div><div class="case-visual-grid">${signalDonutCard(record)}${sourceHealthCard(record)}${signalTrendCard(record)}${visualRelationshipCard(record)}</div></section>`;
+}
+
 function overviewContent(record) {
   const result = record.result;
   const modules = result.modules ?? {};
@@ -158,6 +284,7 @@ function overviewContent(record) {
       <article class="metric-card"><span class="metric-label">Registration</span><strong class="metric-word">${esc(registration?.status === "ok" ? "Found" : registration?.status === "error" ? "Unavailable" : "Pending")}</strong><span class="metric-foot">${esc(registrationName)}</span></article>
       <article class="metric-card"><span class="metric-label">Updated</span><strong class="metric-time">${esc(shortDate(result.generatedAt))}</strong><span class="metric-foot">Latest collection run</span></article>
     </div>
+    ${caseVisualDashboard(record)}
     <section class="overview-grid">
       <article class="panel overview-panel">
         <div class="panel-heading"><div><span class="eyebrow">01 / NETWORK RECORDS</span><h3>DNS snapshot</h3></div><button class="text-button" data-tab="dns">View details <span>→</span></button></div>
@@ -202,6 +329,7 @@ function emailOverview(record) {
       <article class="metric-card"><span class="metric-label">SPF records</span><strong class="metric-word">${esc(policy(audit?.spfStatus))}</strong><span class="metric-foot">Matching sender-policy TXT records</span></article>
       <article class="metric-card"><span class="metric-label">DMARC records</span><strong class="metric-word">${esc(policy(audit?.dmarcStatus))}</strong><span class="metric-foot">Matching _dmarc TXT records</span></article>
     </div>
+    ${caseVisualDashboard(record)}
     <section class="overview-grid">
       <article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">01 / MAIL DOMAIN</span><h3>Public mail configuration</h3></div><button class="text-button" data-tab="email">View audit <span>→</span></button></div>
         <div class="detail-list"><div class="detail-row"><span>MX</span><b>${esc(policy(audit?.mxStatus))}</b></div><div class="detail-row"><span>SPF records</span><b>${esc(policy(audit?.spfStatus))}</b></div><div class="detail-row"><span>DMARC records</span><b>${esc(policy(audit?.dmarcStatus))}</b></div></div>
@@ -225,6 +353,7 @@ function phoneOverview(record) {
       <article class="metric-card"><span class="metric-label">Digits</span><strong>${esc(validation?.digitCount ?? "—")}</strong><span class="metric-foot">Country code included</span></article>
       <article class="metric-card"><span class="metric-label">Network requests</span><strong class="metric-word">None</strong><span class="metric-foot">No lookup was performed</span></article>
     </div>
+    ${caseVisualDashboard(record)}
     <section class="panel overview-panel account-summary"><div class="panel-heading"><div><span class="eyebrow">LOCAL FORMAT CHECK</span><h3>${esc(displayedNumber || "Phone number")}</h3></div><button class="text-button" data-tab="phone">View details <span>→</span></button></div>
       <p class="account-disclaimer">${esc(validation?.notice || "Syntax only. No subscriber, carrier, location, or account information is queried.")}</p>
     </section>${notesPanel(record)}`;
@@ -245,6 +374,7 @@ function networkOverview(record) {
       <article class="metric-card"><span class="metric-label">Registry country</span><strong class="metric-word">${esc(registration?.country || "—")}</strong><span class="metric-foot">Allocation record, not geolocation</span></article>
       <article class="metric-card"><span class="metric-label">Registration</span><strong class="metric-word">${esc(registrationLabel)}</strong><span class="metric-foot">${esc(registration?.name || registration?.networkType || registration?.handle || "No registration name returned")}</span></article>
     </div>
+    ${caseVisualDashboard(record)}
     <section class="overview-grid">
       ${isIp ? `<article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">01 / REVERSE DNS</span><h3>PTR names</h3></div><button class="text-button" data-tab="ptr">View details <span>→</span></button></div>${reverse?.status === "ok" ? (reverse.names?.length ? `<div class="pill-row">${reverse.names.slice(0, 8).map((name) => `<span class="mini-pill">${esc(name)}</span>`).join("")}</div>` : `<div class="subtle-note">No PTR answer returned.</div>`) : `<div class="inline-error">${esc(reverse?.error || "Reverse DNS lookup was not available.")}</div>`}<div class="subtle-note">PTR records are set by the address-range operator and may be stale.</div></article>` : `<article class="panel overview-panel"><div class="panel-heading"><div><span class="eyebrow">01 / ASN REGISTRATION</span><h3>Allocation details</h3></div><button class="text-button" data-tab="registration">View record <span>→</span></button></div>${registration?.status === "ok" ? registrationPreview(registration, "asn") : `<div class="inline-error">${esc(registration?.error || "Registration lookup is not available.")}</div>`}</article>`}
       ${isIp ? `<article class="panel overview-panel registration-panel"><div class="panel-heading"><div><span class="eyebrow">02 / REGISTRY RECORD</span><h3>Registration</h3></div>${registration?.source ? safeLink(registration.source, "RDAP record") : ""}</div>${registration?.status === "ok" ? registrationPreview(registration, entity.type) : `<div class="inline-error">${esc(registration?.error || "Registration lookup is not available.")}</div>`}</article>` : ""}
@@ -263,6 +393,7 @@ function accountOverview(record) {
       <article class="metric-card"><span class="metric-label">Updated</span><strong class="metric-time">${esc(shortDate(record.result.generatedAt))}</strong><span class="metric-foot">Latest collection run</span></article>
     </div>
     ${account?.status === "error" ? `<div class="notice warning-notice">${esc(account.error)}</div>` : ""}
+    ${caseVisualDashboard(record)}
     <section class="panel overview-panel account-summary"><div class="panel-heading"><div><span class="eyebrow">ACCOUNT FOOTPRINT</span><h3>Public profile candidates</h3></div><button class="text-button" data-tab="accounts">View checks <span>→</span></button></div>
       <p class="account-disclaimer">${esc(account?.notice || "A profile URL match is only a lead. It does not verify identity or account ownership.")}</p>
       ${sites.filter((item) => item.status === "found").length ? `<div class="account-chips">${sites.filter((item) => item.status === "found").slice(0, 12).map((item) => `<span class="mini-pill">${esc(item.site)}</span>`).join("")}</div>` : `<div class="subtle-note">No profile candidates have been returned yet.</div>`}
@@ -626,6 +757,16 @@ function workspaceGraphData() {
   return { nodes, edges, cases: eligible.length, omitted };
 }
 
+function workspaceVisualSummary(graph) {
+  const sharedCount = graph.nodes.filter((node) => node.kind !== "root" && node.caseIds?.size > 1).length;
+  const sourceCounts = new Map();
+  for (const edge of graph.edges) sourceCounts.set(edge.source, (sourceCounts.get(edge.source) || 0) + 1);
+  const rankedSources = [...sourceCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6);
+  const maximum = Math.max(1, ...rankedSources.map(([, count]) => count));
+  const bars = rankedSources.map(([source, count], index) => `<li><span class="workspace-source-name"><i style="--source-color:${VISUAL_SIGNAL_COLORS[index % VISUAL_SIGNAL_COLORS.length]}"></i>${esc(source)}</span><span class="workspace-source-track"><i style="width:${(count / maximum * 100).toFixed(1)}%;--source-color:${VISUAL_SIGNAL_COLORS[index % VISUAL_SIGNAL_COLORS.length]}"></i></span><b>${count}</b></li>`).join("");
+  return `<section class="workspace-visual-summary"><div class="workspace-visual-kpis"><article class="panel workspace-visual-kpi"><span>Eligible cases</span><b>${graph.cases}</b><small>Infrastructure only</small></article><article class="panel workspace-visual-kpi"><span>Graph entities</span><b>${graph.nodes.length}</b><small>Hosts, IPs and records</small></article><article class="panel workspace-visual-kpi"><span>Sourced links</span><b>${graph.edges.length}</b><small>Saved observations</small></article><article class="panel workspace-visual-kpi"><span>Shared entities</span><b>${sharedCount}</b><small>Seen in 2+ cases</small></article></div><article class="panel workspace-source-chart"><div class="visual-card-heading"><span><span class="eyebrow">PROVENANCE MIX</span><h3>Links by source</h3></span><span class="visual-card-caption">Top ${rankedSources.length}</span></div>${bars ? `<ul class="workspace-source-bars">${bars}</ul>` : `<div class="visual-empty">No source links to compare.</div>`}</article></section>`;
+}
+
 function workspaceGraphContent() {
   const graph = workspaceGraphData();
   if (!graph.edges.length) return `<div class="tab-intro"><div><span class="eyebrow">CROSS-CASE INFRASTRUCTURE VIEW</span><h2>No infrastructure links to map</h2><p>Save at least one domain, email-domain-only, public IP, or ASN case with collected observations.</p></div></div><div class="empty-panel compact-empty"><h3>This view uses saved cases only</h3><p>It doesn’t make provider requests. Email addresses, phone numbers, and usernames are excluded. Add a scoped infrastructure case to get started.</p></div>`;
@@ -657,7 +798,7 @@ function workspaceGraphContent() {
   const caseLinks = selectedCases.map((record) => `<button class="text-button workspace-case-link" data-case-id="${esc(record.id)}">Open ${esc(caseSubjectLabel(record))}</button>`).join("");
   const canPivot = selected && ["host", "ip"].includes(selected.kind);
   const svgWidth = Math.round(width * state.graphZoom / 100);
-  return `<div class="tab-intro"><div><span class="eyebrow">CROSS-CASE INFRASTRUCTURE VIEW</span><h2>Infrastructure relationship graph</h2><p>${graph.nodes.length} entities · ${graph.edges.length} sourced observations · ${graph.cases} eligible cases</p></div><button class="secondary-button" data-action="export-workspace-graph">Export GraphML</button></div><div class="notice graph-notice">This combines saved infrastructure cases and merges identical host/IP observations across them. A shared provider address or nameserver is a technical overlap, not proof of common ownership. Person/contact cases are excluded; no provider requests are made.</div>${graph.omitted ? `<div class="notice">The combined view reached its display limit; ${graph.omitted} entity/edge candidates were omitted. Individual cases retain their full saved results.</div>` : ""}<section class="panel relationship-graph-panel"><div class="relationship-toolbar"><label class="graph-search-field" for="relationship-search"><span>FIND AN ENTITY</span><input id="relationship-search" type="search" value="${esc(state.graphQuery)}" placeholder="Filter cases, hosts, or addresses" autocomplete="off" /></label><label class="graph-filter-field" for="relationship-filter"><span>SHOW</span><select id="relationship-filter"><option value="all" ${state.graphTypeFilter === "all" ? "selected" : ""}>All entities</option><option value="root" ${state.graphTypeFilter === "root" ? "selected" : ""}>Cases</option><option value="host" ${state.graphTypeFilter === "host" ? "selected" : ""}>Hostnames</option><option value="ip" ${state.graphTypeFilter === "ip" ? "selected" : ""}>IP addresses</option><option value="record" ${state.graphTypeFilter === "record" ? "selected" : ""}>DNS / registry</option></select></label><label class="graph-filter-field" for="relationship-source"><span>PROVENANCE</span><select id="relationship-source"><option value="all" ${state.graphSourceFilter === "all" ? "selected" : ""}>All sources</option>${sources.map((source) => `<option value="${esc(source)}" ${state.graphSourceFilter === source ? "selected" : ""}>${esc(source)}</option>`).join("")}</select></label><label class="graph-zoom-field" for="relationship-zoom"><span>ZOOM <output id="graph-zoom-value">${state.graphZoom}%</output></span><input id="relationship-zoom" type="range" min="70" max="160" step="5" value="${state.graphZoom}" aria-label="Graph zoom" /></label><button class="text-button graph-zoom-reset" data-action="reset-graph-zoom">Reset zoom</button><span class="graph-scroll-hint">Select an entity to inspect linked cases</span></div><div class="network-graph-wrap relationship-canvas"><svg class="relationship-svg" style="width:${svgWidth}px;min-width:${svgWidth}px" data-graph-width="${width}" viewBox="0 0 ${width} ${height}" role="group" aria-label="Infrastructure links across saved cases">${edgeHtml}${nodeHtml}</svg></div><div class="relationship-legend"><span><i class="legend-root"></i>Case subject</span><span><i class="legend-host"></i>Hostname</span><span><i class="legend-ip"></i>IP address</span><span><i class="legend-record"></i>DNS / registry record</span></div><p class="graph-filter-empty" id="graph-filter-empty" hidden>No connections match these filters.</p></section>${selected ? `<section class="panel graph-selection-panel" aria-live="polite"><div class="graph-selection-heading"><span><span class="eyebrow">SELECTED ENTITY</span><h3>${esc(selected.label)}</h3><p>${esc(selected.detail || selected.type)} · ${selectedEdges.length} linked observations · ${selectedCases.length} cases</p></span><div class="graph-selection-actions">${canPivot ? `<button class="secondary-button" data-action="pivot-entity" data-pivot-query="${esc(selected.label)}">Use as new case subject</button>` : ""}${caseLinks}<button class="text-button" data-action="clear-graph-selection">Clear selection</button></div></div>${evidence ? `<ul class="graph-evidence-list">${evidence}</ul>` : ""}</section>` : ""}<section class="panel graph-ledger-panel"><div class="panel-heading"><div><span class="eyebrow">SOURCED CASE LINKS</span><h3>Evidence ledger</h3></div><span class="panel-caption">${graph.edges.length} observations</span></div><div class="panel table-panel"><table><thead><tr><th>Case</th><th>From</th><th>Observation</th><th>To</th><th>Source</th><th>Collected</th></tr></thead><tbody>${ledger}</tbody></table></div></section>`;
+  return `<div class="tab-intro"><div><span class="eyebrow">CROSS-CASE INFRASTRUCTURE VIEW</span><h2>Infrastructure relationship graph</h2><p>${graph.nodes.length} entities · ${graph.edges.length} sourced observations · ${graph.cases} eligible cases</p></div><button class="secondary-button" data-action="export-workspace-graph">Export GraphML</button></div><div class="notice graph-notice">This combines saved infrastructure cases and merges identical host/IP observations across them. A shared provider address or nameserver is a technical overlap, not proof of common ownership. Person/contact cases are excluded; no provider requests are made.</div>${graph.omitted ? `<div class="notice">The combined view reached its display limit; ${graph.omitted} entity/edge candidates were omitted. Individual cases retain their full saved results.</div>` : ""}${workspaceVisualSummary(graph)}<section class="panel relationship-graph-panel"><div class="relationship-toolbar"><label class="graph-search-field" for="relationship-search"><span>FIND AN ENTITY</span><input id="relationship-search" type="search" value="${esc(state.graphQuery)}" placeholder="Filter cases, hosts, or addresses" autocomplete="off" /></label><label class="graph-filter-field" for="relationship-filter"><span>SHOW</span><select id="relationship-filter"><option value="all" ${state.graphTypeFilter === "all" ? "selected" : ""}>All entities</option><option value="root" ${state.graphTypeFilter === "root" ? "selected" : ""}>Cases</option><option value="host" ${state.graphTypeFilter === "host" ? "selected" : ""}>Hostnames</option><option value="ip" ${state.graphTypeFilter === "ip" ? "selected" : ""}>IP addresses</option><option value="record" ${state.graphTypeFilter === "record" ? "selected" : ""}>DNS / registry</option></select></label><label class="graph-filter-field" for="relationship-source"><span>PROVENANCE</span><select id="relationship-source"><option value="all" ${state.graphSourceFilter === "all" ? "selected" : ""}>All sources</option>${sources.map((source) => `<option value="${esc(source)}" ${state.graphSourceFilter === source ? "selected" : ""}>${esc(source)}</option>`).join("")}</select></label><label class="graph-zoom-field" for="relationship-zoom"><span>ZOOM <output id="graph-zoom-value">${state.graphZoom}%</output></span><input id="relationship-zoom" type="range" min="70" max="160" step="5" value="${state.graphZoom}" aria-label="Graph zoom" /></label><button class="text-button graph-zoom-reset" data-action="reset-graph-zoom">Reset zoom</button><span class="graph-scroll-hint">Select an entity to inspect linked cases</span></div><div class="network-graph-wrap relationship-canvas"><svg class="relationship-svg" style="width:${svgWidth}px;min-width:${svgWidth}px" data-graph-width="${width}" viewBox="0 0 ${width} ${height}" role="group" aria-label="Infrastructure links across saved cases">${edgeHtml}${nodeHtml}</svg></div><div class="relationship-legend"><span><i class="legend-root"></i>Case subject</span><span><i class="legend-host"></i>Hostname</span><span><i class="legend-ip"></i>IP address</span><span><i class="legend-record"></i>DNS / registry record</span></div><p class="graph-filter-empty" id="graph-filter-empty" hidden>No connections match these filters.</p></section>${selected ? `<section class="panel graph-selection-panel" aria-live="polite"><div class="graph-selection-heading"><span><span class="eyebrow">SELECTED ENTITY</span><h3>${esc(selected.label)}</h3><p>${esc(selected.detail || selected.type)} · ${selectedEdges.length} linked observations · ${selectedCases.length} cases</p></span><div class="graph-selection-actions">${canPivot ? `<button class="secondary-button" data-action="pivot-entity" data-pivot-query="${esc(selected.label)}">Use as new case subject</button>` : ""}${caseLinks}<button class="text-button" data-action="clear-graph-selection">Clear selection</button></div></div>${evidence ? `<ul class="graph-evidence-list">${evidence}</ul>` : ""}</section>` : ""}<section class="panel graph-ledger-panel"><div class="panel-heading"><div><span class="eyebrow">SOURCED CASE LINKS</span><h3>Evidence ledger</h3></div><span class="panel-caption">${graph.edges.length} observations</span></div><div class="panel table-panel"><table><thead><tr><th>Case</th><th>From</th><th>Observation</th><th>To</th><th>Source</th><th>Collected</th></tr></thead><tbody>${ledger}</tbody></table></div></section>`;
 }
 
 function relationshipTimeline(record, graph) {
