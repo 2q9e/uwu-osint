@@ -238,6 +238,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px; border: 1px solid transparent; border-radius: 20px; font: 8px var(--mono); }
 .status-badge i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
 .status-badge.available { border-color: rgba(165,226,195,.12); background: rgba(165,226,195,.05); color: #97cfb0; }
+.status-badge.partial { border-color: rgba(231,189,124,.16); background: rgba(231,189,124,.05); color: #d5b27b; }
 .status-badge.skipped { border-color: rgba(234,228,255,.11); background: rgba(234,228,255,.035); color: #9691a0; }
 .status-badge.unavailable { border-color: rgba(223,146,158,.13); background: rgba(223,146,158,.04); color: #c68992; }
 .source-name { overflow: hidden; margin-top: 10px; color: #ded9e8; font: 600 11px var(--display); text-overflow: ellipsis; white-space: nowrap; }
