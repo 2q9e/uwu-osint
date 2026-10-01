@@ -1410,7 +1410,7 @@ class Handler(BaseHTTPRequestHandler):
             request_host = None
             request_port = None
         valid_hosts = {"127.0.0.1", "localhost", "::1"}
-        host_valid = (
+        loopback_host_valid = (
             request_host is not None
             and request_host.hostname is not None
             and request_host.hostname.lower() in valid_hosts
@@ -1421,8 +1421,22 @@ class Handler(BaseHTTPRequestHandler):
             and not request_host.fragment
             and request_port in (None, self.server.server_port)
         )
+        public_host = os.environ.get("UWU_OSINT_PUBLIC_HOST", "").strip().lower().rstrip(".")
+        public_host_valid = (
+            bool(public_host)
+            and request_host is not None
+            and request_host.hostname is not None
+            and request_host.hostname.lower().rstrip(".") == public_host
+            and not request_host.username
+            and not request_host.password
+            and request_host.path == ""
+            and not request_host.query
+            and not request_host.fragment
+            and request_port in (None, 443)
+        )
+        host_valid = loopback_host_valid or public_host_valid
         if not host_valid:
-            self.send_json(403, {"error": "This local service accepts loopback requests only."})
+            self.send_json(403, {"error": "This service does not accept requests for this host."})
             return False
         if api:
             fetch_site = self.headers.get("Sec-Fetch-Site", "").lower()
@@ -1437,13 +1451,17 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     parsed_origin = None
                     origin_port = None
+                expected_scheme = "https" if public_host_valid else "http"
+                default_port = 443 if expected_scheme == "https" else 80
+                expected_port = request_port if request_port is not None else default_port
+                origin_default_port = 443 if parsed_origin and parsed_origin.scheme == "https" else 80
                 origin_valid = (
                     parsed_origin is not None
-                    and parsed_origin.scheme == "http"
+                    and parsed_origin.scheme == expected_scheme
                     and parsed_origin.hostname is not None
                     and parsed_origin.hostname.lower() == request_host.hostname.lower()
-                    and (origin_port if origin_port is not None else 80)
-                    == (request_port if request_port is not None else 80)
+                    and (origin_port if origin_port is not None else origin_default_port)
+                    == expected_port
                     and not parsed_origin.username
                     and not parsed_origin.password
                     and parsed_origin.path == ""
