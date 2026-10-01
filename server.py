@@ -9,6 +9,7 @@ import binascii
 import http.client
 import ipaddress
 import json
+import os
 import re
 import socket
 import ssl
@@ -66,15 +67,22 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def fetch_json(url: str, *, expected_host: str, accept: str = "application/json") -> dict | list:
+def fetch_json(
+    url: str,
+    *,
+    expected_host: str,
+    accept: str = "application/json",
+    extra_headers: dict[str, str] | None = None,
+) -> dict | list:
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname != expected_host or parsed.username or parsed.password:
         raise LookupError("The data source URL did not pass validation.")
-    request = Request(
-        url,
-        headers={"User-Agent": USER_AGENT, "Accept": accept},
-        method="GET",
-    )
+    headers = {"User-Agent": USER_AGENT, "Accept": accept}
+    for name, value in (extra_headers or {}).items():
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", name) or "\r" in value or "\n" in value:
+            raise LookupError("The data source request headers did not pass validation.")
+        headers[name] = value
+    request = Request(url, headers=headers, method="GET")
     opener = build_opener(SameHostRedirectHandler())
     try:
         with opener.open(request, timeout=15) as response:
@@ -536,10 +544,19 @@ def list_open_source_tools() -> dict:
         {
             "id": "domain-footprint",
             "name": "Domain footprint",
-            "purpose": "Combine registry, DNS, certificate, passive hostname, and optional historical crawl observations.",
+            "purpose": "Combine registry, DNS, certificate, passive hostname, historical crawl, and optional URLScan public scan observations.",
             "available": True,
             "mode": "Built-in collectors",
             "url": "https://index.commoncrawl.org/",
+            "integration": "native",
+        },
+        {
+            "id": "urlscan-historical-search",
+            "name": "urlscan.io historical scan search",
+            "purpose": "Search public historical scan records for scoped domain hostnames and observation times.",
+            "available": bool(os.environ.get("URLSCAN_API_KEY", "").strip()),
+            "mode": "Optional API key · read-only search · user selected",
+            "url": "https://docs.urlscan.io/apis/urlscan-openapi/search",
             "integration": "native",
         },
         {
@@ -881,7 +898,7 @@ def lookup_host_addresses(host: str) -> dict:
     }
 
 
-DOMAIN_SOURCE_IDS = ("crtsh", "hackertarget", "commoncrawl")
+DOMAIN_SOURCE_IDS = ("crtsh", "hackertarget", "commoncrawl", "urlscan")
 DOMAIN_SOURCE_DEFAULTS = ("crtsh", "hackertarget")
 
 
@@ -897,6 +914,67 @@ def normalize_domain_sources(value) -> tuple[str, ...]:
     if not selected:
         raise LookupError("Select at least one passive hostname source.")
     return selected
+
+
+def get_urlscan_hosts(domain: str) -> dict:
+    """Read a bounded page of historical public urlscan results for one domain."""
+    api_key = os.environ.get("URLSCAN_API_KEY", "").strip()
+    if not api_key:
+        raise LookupError("URLScan was selected, but URLSCAN_API_KEY is not configured on the local server.")
+    if len(api_key) > 256 or not re.fullmatch(r"[A-Za-z0-9._-]{8,256}", api_key):
+        raise LookupError("The local URLScan API key has an invalid format.")
+    query = urlencode({"q": f"page.domain:{domain}", "size": 100})
+    data = fetch_json(
+        f"https://urlscan.io/api/v1/search?{query}",
+        expected_host="urlscan.io",
+        extra_headers={"api-key": api_key},
+    )
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise LookupError("URLScan returned an unexpected search response.")
+
+    suffix = "." + domain
+    observed: dict[str, str] = {}
+    invalid_records = 0
+    for result in data["results"][:100]:
+        if not isinstance(result, dict):
+            invalid_records += 1
+            continue
+        page = result.get("page") if isinstance(result.get("page"), dict) else {}
+        task = result.get("task") if isinstance(result.get("task"), dict) else {}
+        candidate = str(page.get("domain") or task.get("domain") or "").lower().rstrip(".")
+        if not candidate and page.get("url"):
+            try:
+                candidate = urlsplit(str(page["url"])).hostname or ""
+            except ValueError:
+                candidate = ""
+        try:
+            host = normalize_domain(candidate)
+        except LookupError:
+            invalid_records += 1
+            continue
+        if host == domain or not host.endswith(suffix):
+            continue
+        sort_value = result.get("sort")
+        observed_at = str(task.get("time") or (sort_value[0] if isinstance(sort_value, list) and sort_value else ""))
+        if observed_at:
+            try:
+                parsed_time = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+                if parsed_time.tzinfo is None:
+                    parsed_time = parsed_time.replace(tzinfo=timezone.utc)
+                observed_at = parsed_time.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+            except ValueError:
+                observed_at = ""
+        if host not in observed or observed_at > observed[host]:
+            observed[host] = observed_at
+
+    return {
+        "source": "https://urlscan.io/search/",
+        "queriedAt": now_iso(),
+        "hosts": [{"name": host, "lastSeen": timestamp} for host, timestamp in sorted(observed.items())],
+        "truncated": len(data["results"]) >= 100 or bool(data.get("has_more")),
+        "invalidRecords": invalid_records,
+        "resultCount": int(data.get("total", len(data["results"]))) if str(data.get("total", len(data["results"]))).isdigit() else len(data["results"]),
+    }
 
 
 def get_commoncrawl_hosts(domain: str) -> dict:
@@ -979,19 +1057,24 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
     provider_results = {
         "hackertarget": {"status": "skipped", "source": "https://api.hackertarget.com/hostsearch/", "hosts": []},
         "commoncrawl": {"status": "skipped", "source": "https://index.commoncrawl.org/", "hosts": []},
+        "urlscan": {"status": "skipped", "source": "https://urlscan.io/search/", "hosts": []},
     }
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         provider_jobs = {}
         if "hackertarget" in selected:
             provider_jobs["hackertarget"] = pool.submit(run_module, get_hackertarget_hosts, domain)
         if "commoncrawl" in selected:
             provider_jobs["commoncrawl"] = pool.submit(run_module, get_commoncrawl_hosts, domain)
+        if "urlscan" in selected:
+            provider_jobs["urlscan"] = pool.submit(run_module, get_urlscan_hosts, domain)
         for source_id, future in provider_jobs.items():
             provider_results[source_id] = future.result()
     hostsearch = provider_results["hackertarget"]
     commoncrawl = provider_results["commoncrawl"]
+    urlscan = provider_results["urlscan"]
     findings: dict[str, set[str]] = {}
     archive_dates: dict[str, dict[str, str]] = {}
+    observed_dates: dict[str, dict[str, str]] = {}
     if "crtsh" in selected and certificates.get("status") == "ok":
         for item in certificates.get("names", []):
             if not item.get("wildcard"):
@@ -1004,6 +1087,11 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
             findings.setdefault(item["name"], set()).add("Common Crawl")
             if item.get("lastArchived"):
                 archive_dates.setdefault(item["name"], {})["Common Crawl"] = item["lastArchived"]
+    if "urlscan" in selected and urlscan.get("status") == "ok":
+        for item in urlscan.get("hosts", []):
+            findings.setdefault(item["name"], set()).add("urlscan.io")
+            if item.get("lastSeen"):
+                observed_dates.setdefault(item["name"], {})["urlscan.io"] = item["lastSeen"]
     findings.pop(domain, None)
     hostnames = sorted(findings)
     unresolved = hostnames[:25]
@@ -1021,6 +1109,7 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
             "name": host,
             "sources": sorted(findings[host]),
             "archiveDates": archive_dates.get(host, {}),
+            "observedDates": observed_dates.get(host, {}),
             "addresses": resolved.get(host, {}).get("addresses", []),
             "resolutionAttempted": host in resolved,
             "resolutionStatus": resolved.get(host, {}).get("resolutionStatus"),
@@ -1045,6 +1134,12 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
             "error": commoncrawl.get("error"), "truncated": bool(commoncrawl.get("truncated")),
             "archive": commoncrawl.get("archive"), "invalidRecords": commoncrawl.get("invalidRecords", 0),
         },
+        {
+            "id": "urlscan", "name": "urlscan.io public scan search", "status": urlscan.get("status"),
+            "count": len(urlscan.get("hosts", [])), "source": urlscan.get("source"),
+            "error": urlscan.get("error"), "truncated": bool(urlscan.get("truncated")),
+            "invalidRecords": urlscan.get("invalidRecords", 0), "resultCount": urlscan.get("resultCount", 0),
+        },
     ]
     selected_providers = [provider for provider in providers if provider["id"] in selected]
     successful_providers = [provider for provider in selected_providers if provider["status"] == "ok"]
@@ -1058,7 +1153,7 @@ def get_subdomain_map(domain: str, certificates: dict, domain_sources: tuple[str
         "hosts": hosts[:500],
         "totalFound": len(hostnames),
         "resolvedCount": sum(bool(item["addresses"]) for item in hosts),
-        "truncated": len(hostnames) > 500 or bool(hostsearch.get("truncated")) or bool(certificates.get("truncated")) or bool(commoncrawl.get("truncated")),
+        "truncated": len(hostnames) > 500 or bool(hostsearch.get("truncated")) or bool(certificates.get("truncated")) or bool(commoncrawl.get("truncated")) or bool(urlscan.get("truncated")),
         "resolutionLimit": 25,
         "providers": providers,
         "selectedSources": sorted(selected),
@@ -1315,7 +1410,7 @@ class Handler(BaseHTTPRequestHandler):
             request_host = None
             request_port = None
         valid_hosts = {"127.0.0.1", "localhost", "::1"}
-        host_valid = (
+        loopback_host_valid = (
             request_host is not None
             and request_host.hostname is not None
             and request_host.hostname.lower() in valid_hosts
@@ -1326,8 +1421,22 @@ class Handler(BaseHTTPRequestHandler):
             and not request_host.fragment
             and request_port in (None, self.server.server_port)
         )
+        public_host = os.environ.get("UWU_OSINT_PUBLIC_HOST", "").strip().lower().rstrip(".")
+        public_host_valid = (
+            bool(public_host)
+            and request_host is not None
+            and request_host.hostname is not None
+            and request_host.hostname.lower().rstrip(".") == public_host
+            and not request_host.username
+            and not request_host.password
+            and request_host.path == ""
+            and not request_host.query
+            and not request_host.fragment
+            and request_port in (None, 443)
+        )
+        host_valid = loopback_host_valid or public_host_valid
         if not host_valid:
-            self.send_json(403, {"error": "This local service accepts loopback requests only."})
+            self.send_json(403, {"error": "This service does not accept requests for this host."})
             return False
         if api:
             fetch_site = self.headers.get("Sec-Fetch-Site", "").lower()
@@ -1342,13 +1451,17 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     parsed_origin = None
                     origin_port = None
+                expected_scheme = "https" if public_host_valid else "http"
+                default_port = 443 if expected_scheme == "https" else 80
+                expected_port = request_port if request_port is not None else default_port
+                origin_default_port = 443 if parsed_origin and parsed_origin.scheme == "https" else 80
                 origin_valid = (
                     parsed_origin is not None
-                    and parsed_origin.scheme == "http"
+                    and parsed_origin.scheme == expected_scheme
                     and parsed_origin.hostname is not None
                     and parsed_origin.hostname.lower() == request_host.hostname.lower()
-                    and (origin_port if origin_port is not None else 80)
-                    == (request_port if request_port is not None else 80)
+                    and (origin_port if origin_port is not None else origin_default_port)
+                    == expected_port
                     and not parsed_origin.username
                     and not parsed_origin.password
                     and parsed_origin.path == ""
